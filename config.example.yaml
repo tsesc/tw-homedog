@@ -1,0 +1,55 @@
+# Taiwan Real Estate Smart Listing Notifier - Configuration
+# Copy this file to config.yaml and fill in your values.
+
+# 搜尋條件
+search:
+  # 模式: "buy" (買房) 或 "rent" (租屋)
+  mode: buy
+
+  # 591 region code (1 = Taipei)
+  region: 1
+
+  # 行政區列表 (使用 591 英文名稱)
+  # Available: Daan, Zhongzheng, Xinyi, Songshan, Zhongshan,
+  #            Neihu, Nangang, Shilin, Beitou, Wanhua, Wenshan, Datong
+  districts:
+    - Nangang
+    - Neihu
+
+  # 價格範圍
+  # buy 模式: 單位為萬 (例: 2000 = 2000萬)
+  # rent 模式: 單位為 NT$/月 (例: 30000 = 30000元/月)
+  price:
+    min: 2000
+    max: 3000
+
+  # 坪數下限
+  size:
+    min_ping: 20
+
+  # 關鍵字篩選
+  keywords:
+    include: []      # 標題必須包含的所有關鍵字, e.g. ["電梯", "新裝潢"]
+    exclude: []      # 標題包含任一即排除, e.g. ["頂樓", "分租"]
+
+  # 爬蟲每次最多抓幾頁搜尋結果
+  max_pages: 3
+
+# Telegram 通知設定
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"  # 從 @BotFather 取得
+  chat_id: "YOUR_CHAT_ID_HERE"      # 你的 chat ID 或 group ID
+
+# 資料庫設定
+database:
+  path: "data/homedog.db"
+
+# 爬蟲設定
+scraper:
+  # 每次請求之間的隨機延遲範圍 (秒)
+  delay_min: 2
+  delay_max: 5
+  # HTTP 請求 timeout (秒)
+  timeout: 30
+  # 失敗重試次數
+  max_retries: 3

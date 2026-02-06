@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Config with secrets
+config.yaml
+
+# Internal planning docs
+prd.txt
+
+# Database (including WAL files)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# AI tool configs (user-specific)
+.agent/
+.augment/
+.claude/
+
+# Cloned reference repo
+base-scraper/
+
+# Test/cache
+.pytest_cache/
+
+# OS
+.DS_Store
