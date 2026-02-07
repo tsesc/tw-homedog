@@ -1,5 +1,6 @@
 """Match engine: filter listings by configured criteria."""
 
+import json
 import logging
 
 from tw_homedog.config import Config
@@ -38,18 +39,43 @@ def match_size(listing: dict, config: Config) -> bool:
     return size >= config.search.min_ping
 
 
+def _build_searchable_text(listing: dict) -> str:
+    """Combine all searchable fields into one string for keyword matching."""
+    parts = [
+        listing.get("title") or "",
+        listing.get("room") or "",
+        listing.get("kind_name") or "",
+        listing.get("address") or "",
+        listing.get("parking_desc") or "",
+        listing.get("shape_name") or "",
+        listing.get("community_name") or "",
+    ]
+    # tags stored as JSON string in DB
+    tags_raw = listing.get("tags")
+    if tags_raw:
+        if isinstance(tags_raw, str):
+            try:
+                tags_list = json.loads(tags_raw)
+            except (json.JSONDecodeError, TypeError):
+                tags_list = []
+        else:
+            tags_list = tags_raw
+        parts.extend(tags_list)
+    return " ".join(parts)
+
+
 def match_keywords(listing: dict, config: Config) -> bool:
-    """Check keyword include/exclude filters against listing title."""
-    title = listing.get("title") or ""
+    """Check keyword include/exclude filters against all listing text fields."""
+    text = _build_searchable_text(listing)
 
     # All include keywords must be present
     for kw in config.search.keywords_include:
-        if kw not in title:
+        if kw not in text:
             return False
 
     # Any exclude keyword means rejection
     for kw in config.search.keywords_exclude:
-        if kw in title:
+        if kw in text:
             return False
 
     return True

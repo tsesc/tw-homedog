@@ -1,5 +1,6 @@
 """Integration test: full pipeline with mock 591 responses."""
 
+import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -16,7 +17,7 @@ def config():
     return Config(
         search=SearchConfig(
             region=1,
-            districts=["Daan"],
+            districts=["大安區"],
             price_min=20000,
             price_max=40000,
             mode="rent",
@@ -36,7 +37,7 @@ MOCK_RAW_LISTINGS = [
         "title": "大安區電梯套房近捷運",
         "price": "35,000",
         "address": "台北市大安區忠孝東路",
-        "district": "Daan",
+        "district": "大安區",
         "size_ping": "28",
         "floor": "5F/12F",
         "url": "https://rent.591.com.tw/11111111",
@@ -46,7 +47,7 @@ MOCK_RAW_LISTINGS = [
         "title": "頂樓加蓋雅房",
         "price": "15,000",
         "address": "台北市萬華區",
-        "district": "Wanhua",
+        "district": "萬華區",
         "size_ping": "8",
         "floor": "6F/6F",
         "url": "https://rent.591.com.tw/22222222",
@@ -56,7 +57,7 @@ MOCK_RAW_LISTINGS = [
         "title": "中山區精裝公寓",
         "price": "30,000",
         "address": "台北市中山區",
-        "district": "Zhongshan",
+        "district": "中山區",
         "size_ping": "22",
         "floor": "3F/5F",
         "url": "https://rent.591.com.tw/33333333",
@@ -80,7 +81,7 @@ def test_full_pipeline_scrape_to_match(config, tmp_path):
 
     # Only listing 11111111 should match:
     # - 22222222: excluded by keyword "頂樓" + wrong district + below min price
-    # - 33333333: district Zhongshan not in ["Daan"]
+    # - 33333333: district 中山區 not in ["大安區"]
     assert len(matched) == 1
     assert matched[0]["listing_id"] == "11111111"
     storage.close()
@@ -105,7 +106,7 @@ def test_full_pipeline_with_notify(mock_bot_cls, config, tmp_path):
     matched = find_matching_listings(config, storage)
     assert len(matched) == 1
 
-    sent = send_notifications(config, storage, matched)
+    sent = asyncio.run(send_notifications(config, storage, matched))
     assert sent == 1
     assert storage.is_notified("591", "11111111")
 

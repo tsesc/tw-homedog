@@ -9,33 +9,21 @@ import requests
 from bs4 import BeautifulSoup
 
 from tw_homedog.config import Config
+from tw_homedog.regions import (
+    BUY_SECTION_CODES,
+    RENT_SECTION_CODES,
+    resolve_districts,
+)
 
 logger = logging.getLogger(__name__)
 
 # Rent mode
 RENT_BASE_URL = "https://rent.591.com.tw"
-RENT_DISTRICT_CODES = {
-    "Daan": 7, "Zhongzheng": 8, "Xinyi": 3, "Songshan": 4,
-    "Zhongshan": 1, "Neihu": 5, "Nangang": 6, "Shilin": 10,
-    "Beitou": 11, "Wanhua": 9, "Wenshan": 2, "Datong": 12,
-}
 
 # Buy mode
 BUY_BASE_URL = "https://sale.591.com.tw"
 BUY_API_URL = "https://bff-house.591.com.tw/v1/web/sale/list"
-BUY_DISTRICT_CODES = {
-    "Zhongzheng": 1, "Datong": 2, "Zhongshan": 3, "Songshan": 4,
-    "Daan": 5, "Wanhua": 6, "Xinyi": 7, "Shilin": 8,
-    "Beitou": 9, "Neihu": 10, "Nangang": 11, "Wenshan": 12,
-}
-
-# Chinese district name to English name mapping
-ZH_TO_EN_DISTRICT = {
-    "中正區": "Zhongzheng", "大同區": "Datong", "中山區": "Zhongshan",
-    "松山區": "Songshan", "大安區": "Daan", "萬華區": "Wanhua",
-    "信義區": "Xinyi", "士林區": "Shilin", "北投區": "Beitou",
-    "內湖區": "Neihu", "南港區": "Nangang", "文山區": "Wenshan",
-}
+BUY_DETAIL_API_URL = "https://bff-house.591.com.tw/v1/web/sale/detail"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -88,15 +76,14 @@ def _get_buy_session_headers(config: Config) -> tuple[requests.Session, dict]:
 
 def _normalize_buy_listing(item: dict) -> dict:
     """Convert BFF API listing item to our raw format."""
-    section_name = item.get('section_name', '')
-    district = ZH_TO_EN_DISTRICT.get(section_name)
+    section_name = item.get('section_name', '') or None
 
     return {
         "id": str(item.get("houseid", "")),
         "title": item.get("title"),
         "price": item.get("price"),  # in 萬 (10k NTD)
         "address": f"{item.get('section_name', '')} {item.get('address', '')}",
-        "district": district,
+        "district": section_name,
         "size_ping": item.get("area"),
         "floor": item.get("floor"),
         "room": item.get("room"),
@@ -112,9 +99,8 @@ def _normalize_buy_listing(item: dict) -> dict:
 
 def scrape_buy_listings(config: Config) -> list[dict]:
     """Scrape 591 buy listings via BFF API."""
-    district_codes = [
-        BUY_DISTRICT_CODES[d] for d in config.search.districts if d in BUY_DISTRICT_CODES
-    ]
+    resolved = resolve_districts(config.search.region, config.search.districts, mode="buy")
+    district_codes = list(resolved.values())
     if not district_codes:
         logger.warning("No valid districts configured for buy mode")
         return []
@@ -187,6 +173,94 @@ def scrape_buy_listings(config: Config) -> list[dict]:
     return all_listings
 
 
+def _extract_detail_fields(data: dict) -> dict:
+    """Extract enrichment fields from buy detail API response data."""
+    result = {}
+
+    # From ware object
+    ware = data.get("ware") or {}
+    main_area = ware.get("mainarea")
+    if main_area is not None:
+        try:
+            result["main_area"] = float(main_area)
+        except (ValueError, TypeError):
+            pass
+    result["community_name"] = ware.get("community_name") or None
+
+    # From info sections
+    info = data.get("info") or {}
+
+    # info['3'] contains: CarPlace, RatioRate, Fitment, ManagePrice, Shape
+    info3 = info.get("3") or []
+    for item in info3:
+        name = item.get("name", "")
+        value = item.get("value", "")
+        if name == "車位":
+            result["parking_desc"] = value or None
+        elif name == "公設比":
+            result["public_ratio"] = value or None
+        elif name == "管理費":
+            result["manage_price_desc"] = value or None
+        elif name == "裝潢程度":
+            result["fitment"] = value or None
+        elif name == "型態":
+            result["shape_name"] = value or None
+
+    # info['2'] contains: Direction
+    info2 = info.get("2") or []
+    for item in info2:
+        name = item.get("name", "")
+        value = item.get("value", "")
+        if name == "朝向":
+            result["direction"] = value or None
+
+    return result
+
+
+def fetch_buy_listing_detail(
+    session: requests.Session, headers: dict, house_id: str, timeout: int = 30
+) -> dict | None:
+    """Fetch detail data for a single buy listing from BFF API."""
+    timestamp = int(time.time() * 1000)
+    params = {"id": house_id, "timestamp": timestamp}
+    try:
+        resp = session.get(BUY_DETAIL_API_URL, params=params, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            logger.warning("Detail API returned %d for house_id=%s", resp.status_code, house_id)
+            return None
+        body = resp.json()
+        if body.get("status") != 1:
+            logger.warning(
+                "Detail API error for house_id=%s: status=%s msg=%s",
+                house_id, body.get("status"), body.get("msg", ""),
+            )
+            logger.debug("Detail API full response for house_id=%s: %s", house_id, body)
+            return None
+        return _extract_detail_fields(body.get("data", {}))
+    except Exception as e:
+        logger.error("Failed to fetch detail for house_id=%s: %s", house_id, e)
+        return None
+
+
+def enrich_buy_listings(
+    config: Config,
+    session: requests.Session,
+    headers: dict,
+    listing_ids: list[str],
+) -> dict[str, dict]:
+    """Fetch detail data for multiple buy listings. Returns {listing_id: detail_dict}."""
+    results = {}
+    for i, lid in enumerate(listing_ids):
+        logger.info("Enriching detail %d/%d: %s", i + 1, len(listing_ids), lid)
+        detail = fetch_buy_listing_detail(session, headers, lid, timeout=config.scraper.timeout)
+        if detail:
+            results[lid] = detail
+        if i < len(listing_ids) - 1:
+            time.sleep(random.uniform(config.scraper.delay_min, config.scraper.delay_max))
+    logger.info("Enriched %d/%d listings", len(results), len(listing_ids))
+    return results
+
+
 # =============================================================================
 # Rent mode: Playwright + HTTP scraper (original)
 # =============================================================================
@@ -228,9 +302,8 @@ def collect_listing_ids(config: Config) -> list[str]:
     from playwright.sync_api import sync_playwright
 
     all_ids = set()
-    district_codes = [
-        RENT_DISTRICT_CODES[d] for d in config.search.districts if d in RENT_DISTRICT_CODES
-    ]
+    resolved = resolve_districts(config.search.region, config.search.districts, mode="rent")
+    district_codes = list(resolved.values())
     if not district_codes:
         logger.warning("No valid districts configured")
         return []
@@ -361,11 +434,15 @@ def _parse_listing_html(html: str, listing_id: str) -> dict:
         address = addr_tag.get_text(strip=True)
 
     district = None
+    # Match Chinese district names from the region's section codes
+    region_sections = BUY_SECTION_CODES.get(1, {})  # Default to Taipei
+    rent_sections = RENT_SECTION_CODES.get(1, {})
+    all_district_names = set(region_sections.keys()) | set(rent_sections.keys())
     for text_block in [address or "", title or ""]:
-        for zh_name, en_name in ZH_TO_EN_DISTRICT.items():
+        for zh_name in all_district_names:
             zh_short = zh_name[:-1]  # Remove 區
             if zh_short in text_block:
-                district = en_name
+                district = zh_name
                 break
         if district:
             break

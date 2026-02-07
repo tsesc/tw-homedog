@@ -70,3 +70,46 @@ def test_get_unnotified_listings(db):
     unnotified = db.get_unnotified_listings()
     assert len(unnotified) == 1
     assert unnotified[0]["listing_id"] == "222"
+
+
+def test_update_listing_detail(db):
+    db.insert_listing(_make_listing())
+    detail = {
+        "parking_desc": "10.53坪，平面式",
+        "public_ratio": "51%",
+        "manage_price_desc": "7900元/月",
+        "fitment": "高檔裝潢",
+        "shape_name": "電梯大樓",
+        "community_name": "VICTOR嘉醴",
+        "main_area": 18.5,
+        "direction": "坐南朝北",
+    }
+    db.update_listing_detail("591", "12345678", detail)
+    row = db.conn.execute("SELECT * FROM listings WHERE listing_id = '12345678'").fetchone()
+    assert row["parking_desc"] == "10.53坪，平面式"
+    assert row["public_ratio"] == "51%"
+    assert row["manage_price_desc"] == "7900元/月"
+    assert row["fitment"] == "高檔裝潢"
+    assert row["shape_name"] == "電梯大樓"
+    assert row["community_name"] == "VICTOR嘉醴"
+    assert row["main_area"] == 18.5
+    assert row["direction"] == "坐南朝北"
+    assert row["is_enriched"] == 1
+
+
+def test_is_enriched_default(db):
+    db.insert_listing(_make_listing())
+    row = db.conn.execute("SELECT is_enriched FROM listings WHERE listing_id = '12345678'").fetchone()
+    assert row["is_enriched"] == 0
+
+
+def test_get_unenriched_listing_ids(db):
+    db.insert_listing(_make_listing(listing_id="111"))
+    db.insert_listing(_make_listing(listing_id="222", raw_hash="def456"))
+    db.update_listing_detail("591", "111", {"parking_desc": "test"})
+    unenriched = db.get_unenriched_listing_ids(["111", "222"])
+    assert unenriched == ["222"]
+
+
+def test_get_unenriched_listing_ids_empty(db):
+    assert db.get_unenriched_listing_ids([]) == []

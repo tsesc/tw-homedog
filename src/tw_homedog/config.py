@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 REQUIRED_FIELDS = {
-    "search.region": int,
+    "search.region": (int, str),
     "search.districts": list,
     "search.price.min": (int, float),
     "search.price.max": (int, float),
@@ -112,10 +112,18 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     size = search.get("size", {})
     keywords = search.get("keywords", {})
 
+    from tw_homedog.regions import resolve_region, EN_TO_ZH
+
+    region = resolve_region(search["region"])
+
+    # Convert English district names to Chinese (backward compat)
+    raw_districts = search["districts"]
+    districts = [EN_TO_ZH.get(d, d) for d in raw_districts]
+
     return Config(
         search=SearchConfig(
-            region=search["region"],
-            districts=search["districts"],
+            region=region,
+            districts=districts,
             price_min=search["price"]["min"],
             price_max=search["price"]["max"],
             mode=search.get("mode", "buy"),

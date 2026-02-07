@@ -1,0 +1,26 @@
+# 買房：南港 首購小宅
+# 篩選條件：1500-2500萬、15坪以上、近捷運
+
+search:
+  mode: buy
+  region: 1
+  districts:
+    - Nangang
+  price:
+    min: 1500
+    max: 2500
+  size:
+    min_ping: 15
+  keywords:
+    include: []
+    exclude:
+      - 頂加
+      - 工業宅
+  max_pages: 10
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: "YOUR_CHAT_ID_HERE"
+
+database:
+  path: "data/homedog.db"

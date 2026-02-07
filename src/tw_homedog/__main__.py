@@ -1,26 +1,29 @@
-"""CLI entry point for tw_homedog."""
+"""Entry point for tw_homedog — Bot mode (default) or CLI mode (--cli)."""
 
 import argparse
+import asyncio
 import logging
+import os
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from tw_homedog.config import load_config
+from tw_homedog.log import setup_logging
 from tw_homedog.matcher import find_matching_listings
 from tw_homedog.normalizer import normalize_591_listing
 from tw_homedog.notifier import send_notifications
-from tw_homedog.scraper import scrape_listings
+from tw_homedog.scraper import scrape_listings, _get_buy_session_headers, enrich_buy_listings
 from tw_homedog.storage import Storage
 
 logger = logging.getLogger("tw_homedog")
 
 
-def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
+# =============================================================================
+# CLI mode functions (preserved for --cli)
+# =============================================================================
 
 def cmd_scrape(config):
     """Scrape 591 and store listings in DB."""
@@ -38,6 +41,28 @@ def cmd_scrape(config):
         storage.close()
 
 
+def _enrich_matched_listings(config, storage, matched):
+    """Enrich matched buy listings that haven't been enriched yet."""
+    if config.search.mode != "buy" or not matched:
+        return matched
+
+    matched_ids = [m["listing_id"] for m in matched]
+    unenriched = storage.get_unenriched_listing_ids(matched_ids)
+    if not unenriched:
+        logger.info("All matched listings already enriched")
+        return matched
+
+    logger.info("Enriching %d unenriched listings...", len(unenriched))
+    session, headers = _get_buy_session_headers(config)
+    details = enrich_buy_listings(config, session, headers, unenriched)
+
+    for lid, detail in details.items():
+        storage.update_listing_detail("591", lid, detail)
+
+    logger.info("Enrichment complete, re-running match...")
+    return find_matching_listings(config, storage)
+
+
 def cmd_notify(config):
     """Match and notify for unnotified listings."""
     storage = Storage(config.database_path)
@@ -46,7 +71,13 @@ def cmd_notify(config):
         if not matched:
             logger.info("No new matching listings to notify")
             return 0
-        sent = send_notifications(config, storage, matched)
+
+        matched = _enrich_matched_listings(config, storage, matched)
+        if not matched:
+            logger.info("No matching listings after enrichment")
+            return 0
+
+        sent = asyncio.run(send_notifications(config, storage, matched))
         logger.info("Notification complete: %d sent", sent)
         return sent
     finally:
@@ -74,10 +105,15 @@ def cmd_run(config):
     return 0
 
 
-def main():
+# =============================================================================
+# CLI mode entry point
+# =============================================================================
+
+def cli_main():
+    """Original CLI mode entry point."""
     parser = argparse.ArgumentParser(
         prog="tw_homedog",
-        description="Taiwan Real Estate Smart Listing Notifier",
+        description="Taiwan Real Estate Smart Listing Notifier (CLI mode)",
     )
     parser.add_argument(
         "--config", "-c",
@@ -89,8 +125,7 @@ def main():
     subparsers.add_parser("scrape", help="Scrape and store listings only")
     subparsers.add_parser("notify", help="Match and send notifications only")
 
-    args = parser.parse_args()
-    setup_logging()
+    args = parser.parse_args(sys.argv[2:])  # skip 'cli' from sys.argv
 
     try:
         config = load_config(args.config)
@@ -107,6 +142,43 @@ def main():
 
     if args.command == "run" and result != 0:
         sys.exit(result)
+
+
+# =============================================================================
+# Bot mode entry point
+# =============================================================================
+
+def bot_main():
+    """Bot mode entry point — long-running Telegram Bot process."""
+    from tw_homedog.bot import run_bot
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    db_path = os.environ.get("DATABASE_PATH", "data/homedog.db")
+
+    if not bot_token:
+        logger.error("TELEGRAM_BOT_TOKEN is required (set via environment variable)")
+        sys.exit(1)
+
+    if not chat_id:
+        logger.error("TELEGRAM_CHAT_ID is required (set via environment variable)")
+        sys.exit(1)
+
+    logger.info("Starting tw-homedog Bot mode")
+    run_bot(bot_token, chat_id, db_path)
+
+
+# =============================================================================
+# Main entry
+# =============================================================================
+
+def main():
+    setup_logging(log_dir="logs")
+
+    if len(sys.argv) > 1 and sys.argv[1] == "cli":
+        cli_main()
+    else:
+        bot_main()
 
 
 if __name__ == "__main__":

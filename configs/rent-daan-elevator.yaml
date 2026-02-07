@@ -1,0 +1,29 @@
+# 租屋：大安/中山 電梯套房
+# 篩選條件：20000-40000元/月、15坪以上、要有電梯
+
+search:
+  mode: rent
+  region: 1
+  districts:
+    - Daan
+    - Zhongshan
+  price:
+    min: 20000
+    max: 40000
+  size:
+    min_ping: 15
+  keywords:
+    include:
+      - 電梯
+    exclude:
+      - 頂樓
+      - 分租
+      - 雅房
+  max_pages: 5
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: "YOUR_CHAT_ID_HERE"
+
+database:
+  path: "data/homedog.db"

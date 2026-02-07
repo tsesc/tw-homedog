@@ -10,8 +10,8 @@ from tw_homedog.config import load_config, Config
 def valid_config_data():
     return {
         "search": {
-            "region": 1,
-            "districts": ["Daan", "Zhongshan"],
+            "region": "台北市",
+            "districts": ["大安區", "中山區"],
             "price": {"min": 20000, "max": 40000},
             "size": {"min_ping": 20},
             "keywords": {"include": ["電梯"], "exclude": ["頂樓"]},
@@ -33,8 +33,8 @@ def config_file(tmp_path, valid_config_data):
 def test_load_valid_config(config_file):
     cfg = load_config(config_file)
     assert isinstance(cfg, Config)
-    assert cfg.search.region == 1
-    assert cfg.search.districts == ["Daan", "Zhongshan"]
+    assert cfg.search.region == 1  # "台北市" resolved to 1
+    assert cfg.search.districts == ["大安區", "中山區"]
     assert cfg.search.price_min == 20000
     assert cfg.search.price_max == 40000
     assert cfg.search.min_ping == 20
@@ -43,6 +43,30 @@ def test_load_valid_config(config_file):
     assert cfg.telegram.bot_token == "123:ABC"
     assert cfg.telegram.chat_id == "456"
     assert cfg.database_path == "data/test.db"
+
+
+def test_load_config_numeric_region(tmp_path, valid_config_data):
+    valid_config_data["search"]["region"] = 1
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    cfg = load_config(p)
+    assert cfg.search.region == 1
+
+
+def test_load_config_english_districts_backward_compat(tmp_path, valid_config_data):
+    valid_config_data["search"]["districts"] = ["Daan", "Zhongshan"]
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    cfg = load_config(p)
+    assert cfg.search.districts == ["大安區", "中山區"]
+
+
+def test_load_config_mixed_districts(tmp_path, valid_config_data):
+    valid_config_data["search"]["districts"] = ["大安區", "Zhongshan"]
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    cfg = load_config(p)
+    assert cfg.search.districts == ["大安區", "中山區"]
 
 
 def test_config_file_not_found():
@@ -66,7 +90,7 @@ def test_missing_required_field(tmp_path, valid_config_data):
 
 
 def test_invalid_type(tmp_path, valid_config_data):
-    valid_config_data["search"]["region"] = "not_an_int"
+    valid_config_data["search"]["region"] = [1, 2, 3]  # list is invalid
     p = tmp_path / "config.yaml"
     p.write_text(yaml.dump(valid_config_data))
     with pytest.raises(ValueError, match="Invalid type.*search.region"):

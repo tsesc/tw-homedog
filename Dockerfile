@@ -33,7 +33,9 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /root/.cache/ms-playwright /root/.cache/ms-playwright
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Create data directory
-RUN mkdir -p /app/data
+# Create data and logs directories
+RUN mkdir -p /app/data /app/logs
 
-CMD ["python", "-m", "tw_homedog", "run"]
+# Default: Bot mode (long-running)
+# Override with: CMD ["python", "-m", "tw_homedog", "cli", "run"]
+CMD ["python", "-m", "tw_homedog"]

@@ -13,7 +13,7 @@ wheels/
 config.yaml
 
 # Internal planning docs
-prd.txt
+prd*.txt
 
 # Database (including WAL files)
 data/*.db
@@ -33,3 +33,4 @@ base-scraper/
 
 # OS
 .DS_Store
+.env

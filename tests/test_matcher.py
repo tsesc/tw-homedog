@@ -12,7 +12,7 @@ def config():
     return Config(
         search=SearchConfig(
             region=1,
-            districts=["Daan", "Zhongshan"],
+            districts=["大安區", "中山區"],
             price_min=20000,
             price_max=40000,
             min_ping=20,
@@ -31,7 +31,7 @@ def _listing(**overrides):
         "listing_id": "123",
         "title": "大安區電梯套房",
         "price": 35000,
-        "district": "Daan",
+        "district": "大安區",
         "size_ping": 28.0,
     }
     base.update(overrides)
@@ -58,10 +58,10 @@ def test_price_open_ended_max(config):
 
 # District filter tests
 def test_district_match(config):
-    assert match_district(_listing(district="Daan"), config) is True
+    assert match_district(_listing(district="大安區"), config) is True
 
 def test_district_no_match(config):
-    assert match_district(_listing(district="Wanhua"), config) is False
+    assert match_district(_listing(district="萬華區"), config) is False
 
 def test_district_none_passes(config):
     assert match_district(_listing(district=None), config) is True
@@ -98,25 +98,68 @@ def test_keyword_no_config(config):
     assert match_keywords(_listing(title="anything"), config) is True
 
 
+def test_keyword_searches_room_field(config):
+    config.search.keywords_include = ["3房"]
+    config.search.keywords_exclude = []
+    # Title doesn't have "3房" but room field does
+    assert match_keywords(_listing(title="南港套房", room="3房2廳2衛"), config) is True
+    assert match_keywords(_listing(title="南港套房", room="2房1廳1衛"), config) is False
+
+
+def test_keyword_searches_tags_json(config):
+    import json
+    config.search.keywords_include = ["含車位"]
+    config.search.keywords_exclude = []
+    assert match_keywords(_listing(title="南港套房", tags=json.dumps(["含車位", "有陽台"])), config) is True
+    assert match_keywords(_listing(title="南港套房", tags=json.dumps(["有陽台"])), config) is False
+
+
+def test_keyword_exclude_in_tags(config):
+    import json
+    config.search.keywords_include = []
+    config.search.keywords_exclude = ["頂加"]
+    assert match_keywords(_listing(title="好房", tags=json.dumps(["頂加"])), config) is False
+
+
+def test_keyword_searches_parking_desc(config):
+    config.search.keywords_include = ["平面"]
+    config.search.keywords_exclude = []
+    assert match_keywords(_listing(title="南港套房", parking_desc="10.53坪，平面式"), config) is True
+    assert match_keywords(_listing(title="南港套房", parking_desc="機械式"), config) is False
+
+
+def test_keyword_searches_shape_name(config):
+    config.search.keywords_include = ["電梯大樓"]
+    config.search.keywords_exclude = []
+    assert match_keywords(_listing(title="南港套房", shape_name="電梯大樓"), config) is True
+    assert match_keywords(_listing(title="南港套房", shape_name="公寓"), config) is False
+
+
+def test_keyword_searches_community_name(config):
+    config.search.keywords_include = ["VICTOR"]
+    config.search.keywords_exclude = []
+    assert match_keywords(_listing(title="南港套房", community_name="VICTOR嘉醴"), config) is True
+
+
 # Composite matcher test
 def test_find_matching_listings(config, tmp_path):
     db = Storage(str(tmp_path / "test.db"))
     # Insert matching listing
     db.insert_listing({
         "source": "591", "listing_id": "111", "title": "大安區電梯套房",
-        "price": 35000, "district": "Daan", "size_ping": 28.0,
+        "price": 35000, "district": "大安區", "size_ping": 28.0,
         "raw_hash": "aaa",
     })
     # Insert non-matching listing (wrong district)
     db.insert_listing({
         "source": "591", "listing_id": "222", "title": "電梯套房",
-        "price": 35000, "district": "Wanhua", "size_ping": 28.0,
+        "price": 35000, "district": "萬華區", "size_ping": 28.0,
         "raw_hash": "bbb",
     })
     # Insert already-notified listing
     db.insert_listing({
         "source": "591", "listing_id": "333", "title": "大安區電梯套房",
-        "price": 35000, "district": "Daan", "size_ping": 28.0,
+        "price": 35000, "district": "大安區", "size_ping": 28.0,
         "raw_hash": "ccc",
     })
     db.record_notification("591", "333")

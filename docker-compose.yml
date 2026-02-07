@@ -1,0 +1,17 @@
+services:
+  tw-homedog:
+    build: .
+    container_name: tw-homedog
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - DATABASE_PATH=/app/data/homedog.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - homedog-data:/app/data
+      - homedog-logs:/app/logs
+
+volumes:
+  homedog-data:
+  homedog-logs:

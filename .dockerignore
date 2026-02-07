@@ -1,0 +1,16 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+.venv
+data/
+logs/
+*.db
+config.yaml
+.env
+openspec/
+tests/
+prd*.txt
+CLAUDE.md
+IMPLEMENTATION_PLAN.md

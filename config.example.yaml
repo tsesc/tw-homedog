@@ -1,20 +1,29 @@
 # Taiwan Real Estate Smart Listing Notifier - Configuration
 # Copy this file to config.yaml and fill in your values.
+# CLI mode only — Bot mode uses /start templates or inline config.
 
 # 搜尋條件
 search:
   # 模式: "buy" (買房) 或 "rent" (租屋)
   mode: buy
 
-  # 591 region code (1 = Taipei)
-  region: 1
+  # 地區: 中文名稱或數字代碼皆可
+  # 支援全台 22 縣市:
+  #   台北市(1), 新北市(3), 基隆市(2), 桃園市(6),
+  #   新竹市(4), 新竹縣(5), 苗栗縣(21),
+  #   台中市(8), 彰化縣(10), 南投縣(11),
+  #   雲林縣(12), 嘉義市(13), 嘉義縣(14),
+  #   台南市(15), 高雄市(17), 屏東縣(19),
+  #   宜蘭縣(22), 花蓮縣(23), 台東縣(24),
+  #   澎湖縣(25), 金門縣(26), 連江縣(27)
+  region: "台北市"
 
-  # 行政區列表 (使用 591 英文名稱)
-  # Available: Daan, Zhongzheng, Xinyi, Songshan, Zhongshan,
-  #            Neihu, Nangang, Shilin, Beitou, Wanhua, Wenshan, Datong
+  # 行政區列表 (使用中文名稱)
+  # 台北市: 中正區, 大同區, 中山區, 松山區, 大安區, 萬華區,
+  #         信義區, 士林區, 北投區, 內湖區, 南港區, 文山區
   districts:
-    - Nangang
-    - Neihu
+    - 南港區
+    - 內湖區
 
   # 價格範圍
   # buy 模式: 單位為萬 (例: 2000 = 2000萬)
