@@ -16,7 +16,7 @@ from tw_homedog.storage import Storage
 def config():
     return Config(
         search=SearchConfig(
-            region=1,
+            regions=[1],
             districts=["大安區"],
             price_min=20000,
             price_max=40000,

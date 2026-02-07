@@ -79,7 +79,7 @@ def test_format_listing_missing_fields():
 @pytest.fixture
 def config():
     return Config(
-        search=SearchConfig(region=1, districts=["大安區"], price_min=20000, price_max=40000, mode="rent"),
+        search=SearchConfig(regions=[1], districts=["大安區"], price_min=20000, price_max=40000, mode="rent"),
         telegram=TelegramConfig(bot_token="test:TOKEN", chat_id="123456"),
         database_path="data/test.db",
         scraper=ScraperConfig(),

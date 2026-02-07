@@ -48,10 +48,13 @@ logger = logging.getLogger(__name__)
     SETUP_CONFIRM,
     SETTINGS_PRICE_INPUT,
     SETTINGS_SIZE_INPUT,
-    SETTINGS_KW_INPUT,
+    SETTINGS_MENU,
+    SETTINGS_KW_MENU,
+    SETTINGS_KW_INCLUDE_INPUT,
+    SETTINGS_KW_EXCLUDE_INPUT,
     SETTINGS_SCHEDULE_INPUT,
     SETTINGS_PAGES_INPUT,
-) = range(11)
+) = range(14)
 
 # Reverse lookup: region_id → Chinese name
 _REGION_ID_TO_NAME: dict[int, str] = {v: k for k, v in REGION_CODES.items()}
@@ -171,7 +174,7 @@ async def setup_template_callback(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["setup"] = config_items
 
     mode = config_items["search.mode"]
-    region_name = _REGION_ID_TO_NAME.get(config_items["search.region"], str(config_items["search.region"]))
+    region_name = _region_names(config_items["search.regions"])
     districts = ", ".join(config_items["search.districts"])
     unit = "萬" if mode == "buy" else "元"
     price_min = config_items["search.price_min"]
@@ -215,7 +218,7 @@ async def setup_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text(
         f"已選擇：{'買房' if mode == 'buy' else '租房'}\n\n"
-        "請輸入地區（例如：台北市，或代碼 1）："
+        "請輸入地區（多個地區用逗號分隔，例如：台北市,新北市）："
     )
     return SETUP_REGION
 
@@ -223,30 +226,39 @@ async def setup_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def setup_region_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle region input in setup flow. Accepts Chinese name or numeric code."""
     text = update.message.text.strip()
-    try:
-        region = resolve_region(int(text) if text.isdigit() else text)
-    except (ValueError, TypeError):
-        region_list = ", ".join(REGION_CODES.keys())
-        await update.message.reply_text(
-            f"無效的地區。請輸入中文名或代碼。\n支援的地區：{region_list}"
-        )
+    regions = []
+    for part in text.split(","):
+        part = part.strip().replace("，", "")
+        if not part:
+            continue
+        try:
+            regions.append(resolve_region(int(part) if part.isdigit() else part))
+        except (ValueError, TypeError):
+            region_list = ", ".join(REGION_CODES.keys())
+            await update.message.reply_text(
+                f"無效的地區：{part}\n請輸入中文名或代碼，多個地區用逗號分隔。\n支援的地區：{region_list}"
+            )
+            return SETUP_REGION
+
+    if not regions:
+        await update.message.reply_text("請至少輸入一個地區")
         return SETUP_REGION
 
     setup = context.user_data["setup"]
-    setup["search.region"] = region
+    setup["search.regions"] = regions
 
     mode = setup.get("search.mode", "buy")
 
     # Show district selection
     selected = []
-    keyboard = _build_district_keyboard(region, mode, selected)
+    keyboard = _build_district_keyboard(regions, mode, selected)
     if keyboard is None:
         await update.message.reply_text(
-            f"{'租房' if mode == 'rent' else '買房'}模式不支援此地區的區域選擇。"
+            f"{'租房' if mode == 'rent' else '買房'}模式不支援這些地區的區域選擇。"
         )
         return SETUP_REGION
 
-    region_name = _REGION_ID_TO_NAME.get(region, str(region))
+    region_name = _region_names(regions)
     await update.message.reply_text(
         f"地區：{region_name}\n請選擇區域（點擊切換，完成後按確認）：",
         reply_markup=keyboard,
@@ -287,9 +299,9 @@ async def setup_districts_callback(update: Update, context: ContextTypes.DEFAULT
     else:
         selected.append(district)
 
-    region = setup.get("search.region", 1)
+    regions = setup.get("search.regions", [1])
     mode = setup.get("search.mode", "buy")
-    keyboard = _build_district_keyboard(region, mode, selected)
+    keyboard = _build_district_keyboard(regions, mode, selected)
     await query.edit_message_reply_markup(reply_markup=keyboard)
     return SETUP_DISTRICTS
 
@@ -309,8 +321,8 @@ async def setup_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     mode = setup.get("search.mode", "buy")
     unit = "萬" if mode == "buy" else "元"
-    region = setup.get("search.region", 1)
-    region_name = _REGION_ID_TO_NAME.get(region, str(region))
+    regions = setup.get("search.regions", [1])
+    region_name = _region_names(regions)
 
     summary = (
         f"設定摘要：\n"
@@ -377,7 +389,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     mode = db_config.get("search.mode", "buy")
-    region = db_config.get("search.region", 1)
+    regions = db_config.get("search.regions", [1])
     districts = db_config.get("search.districts", [])
     price_min = db_config.get("search.price_min", 0)
     price_max = db_config.get("search.price_max", 0)
@@ -389,7 +401,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     last_status = db_config.get("scheduler.last_run_status", "-")
 
     unit = "萬" if mode == "buy" else "元"
-    region_name = _REGION_ID_TO_NAME.get(region, str(region))
+    region_name = _region_names(regions)
     district_names = ", ".join(districts)
 
     total = storage.get_listing_count()
@@ -490,7 +502,7 @@ async def cmd_loglevel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # Settings handlers
 # =============================================================================
 
-async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /settings command — show settings menu."""
     keyboard = [
         [
@@ -512,6 +524,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "設定選單：", reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    return SETTINGS_MENU
 
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -537,19 +550,19 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ]
         ]
         await query.edit_message_text("選擇搜尋模式：", reply_markup=InlineKeyboardMarkup(keyboard))
-        return None
+        return SETTINGS_MENU
 
     elif data == "settings:districts":
         selected = db_config.get("search.districts", [])
-        region = db_config.get("search.region", 1)
+        regions = db_config.get("search.regions", [1])
         mode = db_config.get("search.mode", "buy")
         context.user_data["_selected_districts"] = list(selected)
-        keyboard = _build_district_keyboard(region, mode, selected)
+        keyboard = _build_district_keyboard(regions, mode, selected)
         if keyboard is None:
             await query.edit_message_text("目前地區不支援區域選擇。")
-            return None
+            return ConversationHandler.END
         await query.edit_message_text("點擊切換區域，完成後按確認：", reply_markup=keyboard)
-        return None
+        return SETTINGS_MENU
 
     elif data == "settings:price":
         mode = db_config.get("search.mode", "buy")
@@ -572,18 +585,15 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return SETTINGS_SIZE_INPUT
 
     elif data == "settings:keywords":
+        logger.info("Entering keyword settings, returning SETTINGS_KW_MENU state")
         kw_include = db_config.get("search.keywords_include", [])
         kw_exclude = db_config.get("search.keywords_exclude", [])
+        keyboard = _build_keyword_keyboard(kw_include, kw_exclude)
         await query.edit_message_text(
-            f"包含：{', '.join(kw_include) or '無'}\n"
-            f"排除：{', '.join(kw_exclude) or '無'}\n\n"
-            "輸入格式：\n"
-            "+關鍵字 增加包含\n"
-            "-關鍵字 增加排除\n"
-            "clear 清除全部\n"
-            "done 完成"
+            "關鍵字設定\n點擊關鍵字可刪除，使用下方按鈕新增：",
+            reply_markup=keyboard,
         )
-        return SETTINGS_KW_INPUT
+        return SETTINGS_KW_MENU
 
     elif data == "settings:pages":
         max_pages = db_config.get("search.max_pages", 3)
@@ -604,7 +614,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return None
 
 
-async def set_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def set_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle mode change from settings."""
     query = update.callback_query
     await query.answer()
@@ -616,9 +626,10 @@ async def set_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     label = "買房" if mode == "buy" else "租房"
     summary = _config_summary(db_config)
     await query.edit_message_text(f"已更新搜尋模式為: {label}\n\n{summary}")
+    return ConversationHandler.END
 
 
-async def settings_district_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def settings_district_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle district toggle from settings."""
     query = update.callback_query
     await query.answer()
@@ -629,7 +640,7 @@ async def settings_district_callback(update: Update, context: ContextTypes.DEFAU
     if data == "district_confirm":
         if not selected:
             await query.answer("請至少選擇一個區域", show_alert=True)
-            return
+            return SETTINGS_MENU
 
         db_config: DbConfig = context.bot_data["db_config"]
         db_config.set("search.districts", selected)
@@ -638,7 +649,7 @@ async def settings_district_callback(update: Update, context: ContextTypes.DEFAU
         names = ", ".join(selected)
         summary = _config_summary(db_config)
         await query.edit_message_text(f"已更新區域：{names}\n\n{summary}")
-        return
+        return ConversationHandler.END
 
     district = data.replace("district_toggle:", "")
     if district in selected:
@@ -647,10 +658,11 @@ async def settings_district_callback(update: Update, context: ContextTypes.DEFAU
         selected.append(district)
 
     db_config: DbConfig = context.bot_data["db_config"]
-    region = db_config.get("search.region", 1)
+    regions = db_config.get("search.regions", [1])
     mode = db_config.get("search.mode", "buy")
-    keyboard = _build_district_keyboard(region, mode, selected)
+    keyboard = _build_district_keyboard(regions, mode, selected)
     await query.edit_message_reply_markup(reply_markup=keyboard)
+    return SETTINGS_MENU
 
 
 async def settings_price_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -694,41 +706,127 @@ async def settings_size_handler(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-async def settings_keywords_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle keyword input from settings."""
+async def settings_kw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle all keyword panel button presses."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    logger.info("settings_kw_callback triggered with data: %s", data)
+    db_config: DbConfig = context.bot_data["db_config"]
+
+    if data == "kw_add_include":
+        await query.edit_message_text("請輸入要包含的關鍵字（多個用逗號分隔，例如：電梯,車位）：")
+        return SETTINGS_KW_INCLUDE_INPUT
+
+    elif data == "kw_add_exclude":
+        await query.edit_message_text("請輸入要排除的關鍵字（多個用逗號分隔，例如：頂加,工業宅）：")
+        return SETTINGS_KW_EXCLUDE_INPUT
+
+    elif data.startswith("kw_del_i:"):
+        kw = data.replace("kw_del_i:", "")
+        current = db_config.get("search.keywords_include", [])
+        if kw in current:
+            current.remove(kw)
+            db_config.set("search.keywords_include", current)
+        kw_exclude = db_config.get("search.keywords_exclude", [])
+        keyboard = _build_keyword_keyboard(current, kw_exclude)
+        await query.edit_message_text(
+            f"已刪除包含關鍵字：{kw}\n\n點擊關鍵字可刪除，使用下方按鈕新增：",
+            reply_markup=keyboard,
+        )
+        return SETTINGS_KW_MENU
+
+    elif data.startswith("kw_del_e:"):
+        kw = data.replace("kw_del_e:", "")
+        current = db_config.get("search.keywords_exclude", [])
+        if kw in current:
+            current.remove(kw)
+            db_config.set("search.keywords_exclude", current)
+        kw_include = db_config.get("search.keywords_include", [])
+        keyboard = _build_keyword_keyboard(kw_include, current)
+        await query.edit_message_text(
+            f"已刪除排除關鍵字：{kw}\n\n點擊關鍵字可刪除，使用下方按鈕新增：",
+            reply_markup=keyboard,
+        )
+        return SETTINGS_KW_MENU
+
+    elif data == "kw_clear":
+        db_config.set_many({"search.keywords_include": [], "search.keywords_exclude": []})
+        keyboard = _build_keyword_keyboard([], [])
+        await query.edit_message_text(
+            "已清除所有關鍵字\n\n點擊關鍵字可刪除，使用下方按鈕新增：",
+            reply_markup=keyboard,
+        )
+        return SETTINGS_KW_MENU
+
+    elif data == "kw_done":
+        summary = _config_summary(db_config)
+        await query.edit_message_text(f"關鍵字設定完成\n\n{summary}")
+        return ConversationHandler.END
+
+    # kw_noop — do nothing
+    return SETTINGS_KW_MENU
+
+
+async def settings_kw_include_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle include keyword input — add and return to panel."""
     text = update.message.text.strip()
     db_config: DbConfig = context.bot_data["db_config"]
 
-    if text.lower() == "done":
-        summary = _config_summary(db_config)
-        await update.message.reply_text(f"關鍵字設定完成\n\n{summary}")
-        return ConversationHandler.END
+    keywords = [kw.strip() for kw in text.split(",") if kw.strip()]
+    if not keywords:
+        await update.message.reply_text("請輸入至少一個關鍵字")
+        return SETTINGS_KW_INCLUDE_INPUT
 
-    if text.lower() == "clear":
-        db_config.set_many({"search.keywords_include": [], "search.keywords_exclude": []})
-        await update.message.reply_text("已清除所有關鍵字。輸入 done 完成。")
-        return SETTINGS_KW_INPUT
+    current = db_config.get("search.keywords_include", [])
+    new_kws = [kw for kw in keywords if kw not in current]
+    if not new_kws:
+        kw_exclude = db_config.get("search.keywords_exclude", [])
+        keyboard = _build_keyword_keyboard(current, kw_exclude)
+        await update.message.reply_text("此關鍵字已存在", reply_markup=keyboard)
+        return SETTINGS_KW_MENU
 
-    if text.startswith("+"):
-        kw = text[1:].strip()
-        if kw:
-            current = db_config.get("search.keywords_include", [])
-            if kw not in current:
-                current.append(kw)
-                db_config.set("search.keywords_include", current)
-            await update.message.reply_text(f"已新增包含關鍵字：{kw}\n繼續輸入或 done 完成")
-    elif text.startswith("-"):
-        kw = text[1:].strip()
-        if kw:
-            current = db_config.get("search.keywords_exclude", [])
-            if kw not in current:
-                current.append(kw)
-                db_config.set("search.keywords_exclude", current)
-            await update.message.reply_text(f"已新增排除關鍵字：{kw}\n繼續輸入或 done 完成")
-    else:
-        await update.message.reply_text("請使用 +關鍵字 或 -關鍵字 格式，或輸入 done/clear")
+    current.extend(new_kws)
+    db_config.set("search.keywords_include", current)
 
-    return SETTINGS_KW_INPUT
+    kw_exclude = db_config.get("search.keywords_exclude", [])
+    keyboard = _build_keyword_keyboard(current, kw_exclude)
+    await update.message.reply_text(
+        f"已新增包含：{', '.join(new_kws)}\n\n點擊關鍵字可刪除，使用下方按鈕新增：",
+        reply_markup=keyboard,
+    )
+    return SETTINGS_KW_MENU
+
+
+async def settings_kw_exclude_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle exclude keyword input — add and return to panel."""
+    text = update.message.text.strip()
+    db_config: DbConfig = context.bot_data["db_config"]
+
+    keywords = [kw.strip() for kw in text.split(",") if kw.strip()]
+    if not keywords:
+        await update.message.reply_text("請輸入至少一個關鍵字")
+        return SETTINGS_KW_EXCLUDE_INPUT
+
+    current = db_config.get("search.keywords_exclude", [])
+    new_kws = [kw for kw in keywords if kw not in current]
+    if not new_kws:
+        kw_include = db_config.get("search.keywords_include", [])
+        keyboard = _build_keyword_keyboard(kw_include, current)
+        await update.message.reply_text("此關鍵字已存在", reply_markup=keyboard)
+        return SETTINGS_KW_MENU
+
+    current.extend(new_kws)
+    db_config.set("search.keywords_exclude", current)
+
+    kw_include = db_config.get("search.keywords_include", [])
+    keyboard = _build_keyword_keyboard(kw_include, current)
+    await update.message.reply_text(
+        f"已新增排除：{', '.join(new_kws)}\n\n點擊關鍵字可刪除，使用下方按鈕新增：",
+        reply_markup=keyboard,
+    )
+    return SETTINGS_KW_MENU
 
 
 async def settings_pages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -884,7 +982,7 @@ async def _scheduled_pipeline(context: ContextTypes.DEFAULT_TYPE) -> None:
 def _config_summary(db_config: DbConfig) -> str:
     """Build a short config summary string."""
     mode = db_config.get("search.mode", "buy")
-    region = db_config.get("search.region", 1)
+    regions = db_config.get("search.regions", [1])
     districts = db_config.get("search.districts", [])
     price_min = db_config.get("search.price_min", 0)
     price_max = db_config.get("search.price_max", 0)
@@ -896,7 +994,7 @@ def _config_summary(db_config: DbConfig) -> str:
     paused = db_config.get("scheduler.paused", False)
 
     unit = "萬" if mode == "buy" else "元"
-    region_name = _REGION_ID_TO_NAME.get(region, str(region))
+    region_name = _region_names(regions)
 
     lines = [
         "── 當前設定 ──",
@@ -917,19 +1015,66 @@ def _config_summary(db_config: DbConfig) -> str:
     return "\n".join(lines)
 
 
+def _region_names(region_ids: list[int]) -> str:
+    """Convert a list of region IDs to a comma-separated Chinese name string."""
+    return ", ".join(_REGION_ID_TO_NAME.get(r, str(r)) for r in region_ids)
+
+
+def _build_keyword_keyboard(
+    kw_include: list[str],
+    kw_exclude: list[str],
+) -> InlineKeyboardMarkup:
+    """Build keyword management inline keyboard.
+
+    Shows existing keywords as deletable buttons, plus action buttons.
+    """
+    buttons = []
+
+    if not kw_include and not kw_exclude:
+        buttons.append([InlineKeyboardButton("尚無關鍵字", callback_data="kw_noop")])
+    else:
+        for kw in kw_include:
+            buttons.append([InlineKeyboardButton(
+                f"✅ 包含：{kw}  ✕",
+                callback_data=f"kw_del_i:{kw}",
+            )])
+        for kw in kw_exclude:
+            buttons.append([InlineKeyboardButton(
+                f"🚫 排除：{kw}  ✕",
+                callback_data=f"kw_del_e:{kw}",
+            )])
+
+    action_row = [
+        InlineKeyboardButton("➕ 包含", callback_data="kw_add_include"),
+        InlineKeyboardButton("➖ 排除", callback_data="kw_add_exclude"),
+    ]
+    buttons.append(action_row)
+
+    bottom_row = []
+    if kw_include or kw_exclude:
+        bottom_row.append(InlineKeyboardButton("🗑 清除", callback_data="kw_clear"))
+    bottom_row.append(InlineKeyboardButton("✅ 完成", callback_data="kw_done"))
+    buttons.append(bottom_row)
+
+    return InlineKeyboardMarkup(buttons)
+
+
 def _build_district_keyboard(
-    region_id: int,
+    region_ids: list[int],
     mode: str,
     selected: list[str],
 ) -> InlineKeyboardMarkup | None:
-    """Build district selection inline keyboard for given region and mode.
+    """Build district selection inline keyboard for given regions and mode.
 
+    Merges districts from all provided regions.
     Returns None if no districts are available for the region/mode combination.
     """
-    if mode == "buy":
-        section_map = BUY_SECTION_CODES.get(region_id, {})
-    else:
-        section_map = RENT_SECTION_CODES.get(region_id, {})
+    section_map: dict[str, int] = {}
+    for region_id in region_ids:
+        if mode == "buy":
+            section_map.update(BUY_SECTION_CODES.get(region_id, {}))
+        else:
+            section_map.update(RENT_SECTION_CODES.get(region_id, {}))
 
     if not section_map:
         return None
@@ -1020,14 +1165,25 @@ def create_application(
     settings_conv = ConversationHandler(
         entry_points=[CommandHandler("settings", cmd_settings, filters=auth)],
         states={
+            SETTINGS_MENU: [
+                CallbackQueryHandler(settings_callback, pattern=r"^settings:"),
+                CallbackQueryHandler(set_mode_callback, pattern=r"^set_mode:"),
+                CallbackQueryHandler(settings_district_callback, pattern=r"^district_"),
+            ],
             SETTINGS_PRICE_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_price_handler),
             ],
             SETTINGS_SIZE_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_size_handler),
             ],
-            SETTINGS_KW_INPUT: [
-                MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_keywords_handler),
+            SETTINGS_KW_MENU: [
+                CallbackQueryHandler(settings_kw_callback, pattern=r"^kw_"),
+            ],
+            SETTINGS_KW_INCLUDE_INPUT: [
+                MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_kw_include_handler),
+            ],
+            SETTINGS_KW_EXCLUDE_INPUT: [
+                MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_kw_exclude_handler),
             ],
             SETTINGS_SCHEDULE_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_schedule_handler),
@@ -1050,9 +1206,7 @@ def create_application(
     # Register handlers
     app.add_handler(setup_conv)
     app.add_handler(settings_conv)
-    app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^settings:"))
-    app.add_handler(CallbackQueryHandler(set_mode_callback, pattern=r"^set_mode:"))
-    app.add_handler(CallbackQueryHandler(settings_district_callback, pattern=r"^district_"))
+    # settings_callback, set_mode_callback, and settings_district_callback are now in settings_conv
     app.add_handler(CommandHandler("status", cmd_status, filters=auth))
     app.add_handler(CommandHandler("run", cmd_run, filters=auth))
     app.add_handler(CommandHandler("pause", cmd_pause, filters=auth))

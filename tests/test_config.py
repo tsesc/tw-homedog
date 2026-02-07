@@ -33,7 +33,7 @@ def config_file(tmp_path, valid_config_data):
 def test_load_valid_config(config_file):
     cfg = load_config(config_file)
     assert isinstance(cfg, Config)
-    assert cfg.search.region == 1  # "台北市" resolved to 1
+    assert cfg.search.regions == [1]  # "台北市" resolved to [1]
     assert cfg.search.districts == ["大安區", "中山區"]
     assert cfg.search.price_min == 20000
     assert cfg.search.price_max == 40000
@@ -50,7 +50,7 @@ def test_load_config_numeric_region(tmp_path, valid_config_data):
     p = tmp_path / "config.yaml"
     p.write_text(yaml.dump(valid_config_data))
     cfg = load_config(p)
-    assert cfg.search.region == 1
+    assert cfg.search.regions == [1]
 
 
 def test_load_config_english_districts_backward_compat(tmp_path, valid_config_data):
@@ -89,11 +89,32 @@ def test_missing_required_field(tmp_path, valid_config_data):
         load_config(p)
 
 
-def test_invalid_type(tmp_path, valid_config_data):
-    valid_config_data["search"]["region"] = [1, 2, 3]  # list is invalid
+def test_regions_list_format(tmp_path, valid_config_data):
+    """New 'regions' list format should work."""
+    del valid_config_data["search"]["region"]
+    valid_config_data["search"]["regions"] = ["台北市", "新北市"]
     p = tmp_path / "config.yaml"
     p.write_text(yaml.dump(valid_config_data))
-    with pytest.raises(ValueError, match="Invalid type.*search.region"):
+    cfg = load_config(p)
+    assert cfg.search.regions == [1, 3]
+
+
+def test_regions_must_be_list(tmp_path, valid_config_data):
+    """regions as non-list should raise ValueError."""
+    del valid_config_data["search"]["region"]
+    valid_config_data["search"]["regions"] = "台北市"
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    with pytest.raises(ValueError, match="search.regions must be a list"):
+        load_config(p)
+
+
+def test_missing_region_and_regions(tmp_path, valid_config_data):
+    """Neither region nor regions should raise ValueError."""
+    del valid_config_data["search"]["region"]
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    with pytest.raises(ValueError, match="search.region.*search.regions"):
         load_config(p)
 
 

@@ -6,7 +6,7 @@ from tw_homedog.templates import TEMPLATES, get_template, apply_template
 
 
 def test_all_templates_have_required_fields():
-    required = {"id", "name", "description", "mode", "region", "districts", "price_min", "price_max"}
+    required = {"id", "name", "description", "mode", "regions", "districts", "price_min", "price_max"}
     for t in TEMPLATES:
         missing = required - set(t.keys())
         assert not missing, f"Template '{t.get('id', '?')}' missing fields: {missing}"
@@ -36,7 +36,7 @@ def test_get_template_not_found():
 def test_apply_template_returns_flat_dict():
     result = apply_template("buy_family_taipei")
     assert result["search.mode"] == "buy"
-    assert result["search.region"] == 1  # 台北市
+    assert result["search.regions"] == [1]  # 台北市
     assert result["search.districts"] == ["內湖區", "南港區", "文山區", "士林區", "北投區"]
     assert result["search.price_min"] == 2000
     assert result["search.price_max"] == 4000
@@ -53,7 +53,7 @@ def test_apply_template_rent():
 
 def test_apply_template_newtaipei():
     result = apply_template("buy_invest_newtaipei")
-    assert result["search.region"] == 3  # 新北市
+    assert result["search.regions"] == [3]  # 新北市
     assert "板橋區" in result["search.districts"]
 
 

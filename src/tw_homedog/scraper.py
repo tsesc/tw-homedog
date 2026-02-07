@@ -8,7 +8,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-from tw_homedog.config import Config
+from tw_homedog.config import Config, SearchConfig
 from tw_homedog.regions import (
     BUY_SECTION_CODES,
     RENT_SECTION_CODES,
@@ -52,7 +52,7 @@ def _get_buy_session_headers(config: Config) -> tuple[requests.Session, dict]:
         page = browser.new_page(user_agent=random.choice(USER_AGENTS))
         page.on('request', capture_request)
 
-        page.goto(f'{BUY_BASE_URL}/?shType=list&regionid={config.search.region}',
+        page.goto(f'{BUY_BASE_URL}/?shType=list&regionid={config.search.regions[0]}',
                   timeout=config.scraper.timeout * 1000)
         page.wait_for_load_state('networkidle', timeout=config.scraper.timeout * 1000)
         page.wait_for_timeout(2000)
@@ -99,7 +99,7 @@ def _normalize_buy_listing(item: dict) -> dict:
 
 def scrape_buy_listings(config: Config) -> list[dict]:
     """Scrape 591 buy listings via BFF API."""
-    resolved = resolve_districts(config.search.region, config.search.districts, mode="buy")
+    resolved = resolve_districts(config.search.regions[0], config.search.districts, mode="buy")
     district_codes = list(resolved.values())
     if not district_codes:
         logger.warning("No valid districts configured for buy mode")
@@ -120,7 +120,7 @@ def scrape_buy_listings(config: Config) -> list[dict]:
             'type': 2,
             'timestamp': timestamp,
             'shType': 'list',
-            'regionid': config.search.region,
+            'regionid': config.search.regions[0],
             'section': section_param,
         }
         if config.search.min_ping:
@@ -268,7 +268,7 @@ def enrich_buy_listings(
 def build_search_url(config: Config, district_code: int) -> str:
     """Build 591 rent search URL from config and district code."""
     params = [
-        f"region={config.search.region}",
+        f"region={config.search.regions[0]}",
         f"section={district_code}",
         f"price={config.search.price_min}_{config.search.price_max}",
     ]
@@ -302,7 +302,7 @@ def collect_listing_ids(config: Config) -> list[str]:
     from playwright.sync_api import sync_playwright
 
     all_ids = set()
-    resolved = resolve_districts(config.search.region, config.search.districts, mode="rent")
+    resolved = resolve_districts(config.search.regions[0], config.search.districts, mode="rent")
     district_codes = list(resolved.values())
     if not district_codes:
         logger.warning("No valid districts configured")
@@ -486,9 +486,37 @@ def scrape_rent_listings(config: Config) -> list[dict]:
 # =============================================================================
 
 def scrape_listings(config: Config) -> list[dict]:
-    """Scrape listings based on config mode (rent or buy)."""
+    """Scrape listings based on config mode (rent or buy).
+
+    Loops through all configured regions and combines results.
+    """
+    all_listings = []
     mode = config.search.mode
-    if mode == 'buy':
-        return scrape_buy_listings(config)
-    else:
-        return scrape_rent_listings(config)
+
+    for region_id in config.search.regions:
+        # Create a temporary config with single region for backward compat with helpers
+        temp_config = Config(
+            search=SearchConfig(
+                regions=[region_id],
+                districts=config.search.districts,
+                price_min=config.search.price_min,
+                price_max=config.search.price_max,
+                mode=config.search.mode,
+                min_ping=config.search.min_ping,
+                keywords_include=config.search.keywords_include,
+                keywords_exclude=config.search.keywords_exclude,
+                max_pages=config.search.max_pages,
+            ),
+            telegram=config.telegram,
+            database_path=config.database_path,
+            scraper=config.scraper,
+        )
+
+        if mode == 'buy':
+            listings = scrape_buy_listings(temp_config)
+        else:
+            listings = scrape_rent_listings(temp_config)
+
+        all_listings.extend(listings)
+
+    return all_listings

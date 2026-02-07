@@ -88,7 +88,7 @@ def test_build_config_missing_required(db_config):
 def test_build_config_with_chinese_districts(db_config):
     """Chinese district names in DB should pass through unchanged."""
     db_config.set_many({
-        "search.region": 1,
+        "search.regions": [1],
         "search.districts": ["大安區", "信義區"],
         "search.price_min": 1000,
         "search.price_max": 3000,
@@ -97,7 +97,7 @@ def test_build_config_with_chinese_districts(db_config):
         "telegram.chat_id": "456",
     })
     config = db_config.build_config()
-    assert config.search.region == 1
+    assert config.search.regions == [1]
     assert config.search.districts == ["大安區", "信義區"]
     assert config.search.price_min == 1000
     assert config.search.price_max == 3000
@@ -111,7 +111,7 @@ def test_build_config_with_chinese_districts(db_config):
 def test_build_config_english_districts_converted(db_config):
     """English district names in DB should be converted to Chinese via EN_TO_ZH."""
     db_config.set_many({
-        "search.region": 1,
+        "search.regions": [1],
         "search.districts": ["Daan", "Xinyi", "Neihu"],
         "search.price_min": 1000,
         "search.price_max": 3000,
@@ -125,7 +125,7 @@ def test_build_config_english_districts_converted(db_config):
 def test_build_config_mixed_districts(db_config):
     """Mix of English and Chinese district names — English converted, Chinese kept."""
     db_config.set_many({
-        "search.region": 1,
+        "search.regions": [1],
         "search.districts": ["Daan", "內湖區", "Wenshan"],
         "search.price_min": 1000,
         "search.price_max": 3000,
@@ -138,7 +138,7 @@ def test_build_config_mixed_districts(db_config):
 
 def test_build_config_with_all_fields(db_config):
     db_config.set_many({
-        "search.region": 1,
+        "search.regions": [1],
         "search.districts": ["大安區"],
         "search.price_min": 500,
         "search.price_max": 2000,
@@ -164,6 +164,20 @@ def test_build_config_with_all_fields(db_config):
     assert config.database_path == "/tmp/test.db"
     assert config.scraper.delay_min == 3
     assert config.scraper.timeout == 60
+
+
+def test_build_config_backward_compat_old_region(db_config):
+    """Old 'search.region' (single int) format should still work."""
+    db_config.set_many({
+        "search.region": 1,
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 3000,
+        "telegram.bot_token": "123:ABC",
+        "telegram.chat_id": "456",
+    })
+    config = db_config.build_config()
+    assert config.search.regions == [1]
 
 
 def test_migrate_from_yaml(db_config, tmp_path):
@@ -201,7 +215,7 @@ scraper:
     assert count > 0
 
     config = db_config.build_config()
-    assert config.search.region == 1
+    assert config.search.regions == [1]
     # English names migrated from YAML are converted to Chinese in build_config
     assert config.search.districts == ["大安區", "信義區"]
     assert config.search.price_min == 1000

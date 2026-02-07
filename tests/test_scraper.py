@@ -21,7 +21,7 @@ from tw_homedog.scraper import (
 def rent_config():
     return Config(
         search=SearchConfig(
-            region=1,
+            regions=[1],
             districts=["大安區", "中山區"],
             price_min=20000,
             price_max=40000,
@@ -39,7 +39,7 @@ def rent_config():
 def buy_config():
     return Config(
         search=SearchConfig(
-            region=1,
+            regions=[1],
             districts=["南港區", "內湖區"],
             price_min=2000,
             price_max=3000,

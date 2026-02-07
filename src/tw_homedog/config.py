@@ -6,7 +6,8 @@ from pathlib import Path
 import yaml
 
 REQUIRED_FIELDS = {
-    "search.region": (int, str),
+    # Accept either region (int/str) or regions (list) for backward compatibility
+    # Will be validated separately in load_config
     "search.districts": list,
     "search.price.min": (int, float),
     "search.price.max": (int, float),
@@ -29,7 +30,7 @@ DEFAULTS = {
 
 @dataclass
 class SearchConfig:
-    region: int
+    regions: list[int]  # Changed from region: int to support multiple regions
     districts: list[str]
     price_min: int | float
     price_max: int | float
@@ -114,7 +115,21 @@ def load_config(path: str | Path = "config.yaml") -> Config:
 
     from tw_homedog.regions import resolve_region, EN_TO_ZH
 
-    region = resolve_region(search["region"])
+    # Support both "region" (single) and "regions" (list) for backward compatibility
+    regions_raw = search.get("regions")
+    region_raw = search.get("region")
+
+    if regions_raw is None and region_raw is None:
+        raise ValueError("Config must specify either 'search.region' or 'search.regions'")
+
+    if regions_raw is not None:
+        # New format: regions as list
+        if not isinstance(regions_raw, list):
+            raise ValueError("search.regions must be a list")
+        regions = [resolve_region(r) for r in regions_raw]
+    else:
+        # Old format: single region (backward compat)
+        regions = [resolve_region(region_raw)]
 
     # Convert English district names to Chinese (backward compat)
     raw_districts = search["districts"]
@@ -122,7 +137,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
 
     return Config(
         search=SearchConfig(
-            region=region,
+            regions=regions,
             districts=districts,
             price_min=search["price"]["min"],
             price_max=search["price"]["max"],

@@ -13,7 +13,7 @@ from tw_homedog.regions import EN_TO_ZH
 logger = logging.getLogger(__name__)
 
 REQUIRED_KEYS = [
-    "search.region",
+    # Accept either search.region or search.regions for backward compatibility
     "search.districts",
     "search.price_min",
     "search.price_max",
@@ -32,7 +32,7 @@ DEFAULTS = {
     "scraper.delay_max": 5,
     "scraper.timeout": 30,
     "scraper.max_retries": 3,
-    "scheduler.interval_minutes": 30,
+    "scheduler.interval_minutes": 120,
 }
 
 
@@ -88,11 +88,13 @@ class DbConfig:
 
     def has_config(self) -> bool:
         """Check if any required config keys exist (i.e. setup has been done)."""
+        # Also check for region/regions (backward compat)
+        extended_keys = REQUIRED_KEYS + ["search.region", "search.regions"]
         row = self.conn.execute(
             "SELECT COUNT(*) FROM bot_config WHERE key IN ({})".format(
-                ",".join("?" for _ in REQUIRED_KEYS)
+                ",".join("?" for _ in extended_keys)
             ),
-            REQUIRED_KEYS,
+            extended_keys,
         ).fetchone()
         count = row[0] if isinstance(row, tuple) else row[0]
         return count > 0
@@ -114,13 +116,30 @@ class DbConfig:
                 "Missing required config keys:\n" + "\n".join(f"  - {k}" for k in missing)
             )
 
+        # Support both region (single) and regions (list) for backward compatibility
+        regions_raw = _get("search.regions")
+        region_raw = _get("search.region")
+
+        if regions_raw is None and region_raw is None:
+            raise ValueError("Config must specify either 'search.region' or 'search.regions'")
+
+        if regions_raw is not None:
+            # New format: regions as list
+            if not isinstance(regions_raw, list):
+                regions = [regions_raw]
+            else:
+                regions = regions_raw
+        else:
+            # Old format: single region (backward compat)
+            regions = [region_raw]
+
         # Convert English district names to Chinese for backward compatibility
         raw_districts = _get("search.districts", [])
         districts = [EN_TO_ZH.get(d, d) for d in raw_districts]
 
         return Config(
             search=SearchConfig(
-                region=_get("search.region"),
+                regions=regions,
                 districts=districts,
                 price_min=_get("search.price_min"),
                 price_max=_get("search.price_max"),
