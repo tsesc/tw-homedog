@@ -14,7 +14,8 @@ from tw_homedog.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_SIZE = 10
+# Max notifications per run; None = no cap
+MAX_BATCH_SIZE = None
 MESSAGE_DELAY = 1.0  # seconds between messages
 
 
@@ -168,8 +169,8 @@ async def send_notifications(config: Config, storage: Storage, listings: list[di
     if not listings:
         return 0
 
-    batch = listings[:MAX_BATCH_SIZE]
-    if len(listings) > MAX_BATCH_SIZE:
+    batch = listings if MAX_BATCH_SIZE is None else listings[:MAX_BATCH_SIZE]
+    if MAX_BATCH_SIZE is not None and len(listings) > MAX_BATCH_SIZE:
         logger.warning(
             "Limiting notifications to %d (total matched: %d)", MAX_BATCH_SIZE, len(listings)
         )
