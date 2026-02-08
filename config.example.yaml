@@ -83,3 +83,11 @@ scraper:
   timeout: 30
   # 失敗重試次數
   max_retries: 3
+
+# 物件去重設定
+dedup:
+  enabled: true          # 是否啟用去重
+  threshold: 0.82        # 判定同一物件的分數門檻 (0~1)
+  price_tolerance: 0.05  # 價格相對容忍度
+  size_tolerance: 0.08   # 坪數相對容忍度
+  cleanup_batch_size: 200

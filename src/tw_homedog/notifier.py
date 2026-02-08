@@ -14,8 +14,8 @@ from tw_homedog.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-# Max notifications per run; None = no cap
-MAX_BATCH_SIZE = None
+# Max notifications per run.
+MAX_BATCH_SIZE = 10
 MESSAGE_DELAY = 1.0  # seconds between messages
 
 

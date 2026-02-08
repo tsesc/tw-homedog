@@ -226,15 +226,16 @@ def test_build_list_keyboard_single_page():
     listings = [_make_bot_listing(listing_id=str(i)) for i in range(3)]
     kb = _build_list_keyboard(listings, offset=0, total=3, mode="buy")
     rows = kb.inline_keyboard
-    # 3 listing buttons + 1 nav row + 1 action row
-    assert len(rows) == 5
-    # First 3 are listing buttons
+    # Each listing has 2 buttons (title/community + detail row), then nav + actions
+    assert len(rows) == 8
+    # First listing row
     assert rows[0][0].callback_data == "list:d:0"
     assert "大安區" in rows[0][0].text
+    assert rows[1][0].callback_data == "list:d:0"
     # Nav row shows 1/1
-    assert "1/1" in rows[3][0].text
+    assert "1/1" in rows[6][0].text
     # Action row
-    action_data = [b.callback_data for b in rows[4]]
+    action_data = [b.callback_data for b in rows[7]]
     assert "list:filter" in action_data
     assert "list:ra" in action_data
 
@@ -242,7 +243,7 @@ def test_build_list_keyboard_single_page():
 def test_build_list_keyboard_multi_page_first():
     listings = [_make_bot_listing(listing_id=str(i)) for i in range(5)]
     kb = _build_list_keyboard(listings, offset=0, total=12, mode="buy")
-    nav_row = kb.inline_keyboard[5]  # after 5 listings
+    nav_row = kb.inline_keyboard[10]  # after 5 listings * 2 rows
     nav_data = [b.callback_data for b in nav_row]
     assert "list:p:5" in nav_data  # next page
     assert "list:noop" in nav_data  # page indicator
@@ -251,7 +252,7 @@ def test_build_list_keyboard_multi_page_first():
 def test_build_list_keyboard_multi_page_middle():
     listings = [_make_bot_listing(listing_id=str(i)) for i in range(5)]
     kb = _build_list_keyboard(listings, offset=5, total=15, mode="buy")
-    nav_row = kb.inline_keyboard[5]
+    nav_row = kb.inline_keyboard[10]
     nav_data = [b.callback_data for b in nav_row]
     assert "list:p:0" in nav_data  # prev page
     assert "list:p:10" in nav_data  # next page
@@ -260,7 +261,17 @@ def test_build_list_keyboard_multi_page_middle():
 def test_build_list_keyboard_rent_mode():
     listings = [_make_bot_listing(price=35000)]
     kb = _build_list_keyboard(listings, offset=0, total=1, mode="rent")
-    assert "35,000元" in kb.inline_keyboard[0][0].text
+    assert "35,000元" in kb.inline_keyboard[1][0].text
+
+
+def test_build_list_keyboard_community_fallback_from_title():
+    listings = [_make_bot_listing(
+        listing_id="x1",
+        title="屋主誠售~冠德公園家溫馨美居!!車位可另購",
+        community_name=None,
+    )]
+    kb = _build_list_keyboard(listings, offset=0, total=1, mode="buy")
+    assert "社區 冠德公園家溫馨美居" in kb.inline_keyboard[0][0].text
 
 
 # --- _get_unread_matched ---

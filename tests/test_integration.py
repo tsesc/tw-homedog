@@ -138,3 +138,48 @@ def test_dedup_across_runs(config, tmp_path):
     assert count_after_first == count_after_second == 3
 
     storage.close()
+
+
+def test_dedup_skip_duplicate_brokers_same_property(config, tmp_path):
+    """Duplicate broker posts for same property should be skipped in one batch."""
+    db_path = str(tmp_path / "test.db")
+    storage = Storage(db_path)
+    try:
+        raws = [
+            {
+                "id": "900001",
+                "title": "南港陽光水岸｜電梯大兩房車",
+                "price": "2,980",
+                "address": "台北市南港區向陽路258巷10號",
+                "district": "南港區",
+                "size_ping": "36.5",
+                "floor": "5/12",
+                "room": "3房2廳2衛",
+                "url": "https://sale.591.com.tw/home/house/detail/2/900001.html",
+            },
+            {
+                "id": "900002",
+                "title": "屋主誠售~冠德公園家溫馨美居!!車位可另購",
+                "price": "2,988",
+                "address": "臺北市南港區向陽路258巷10號5樓",
+                "district": "南港區",
+                "size_ping": "36.49",
+                "floor": "5/12",
+                "room": "3房2廳2衛",
+                "url": "https://sale.591.com.tw/home/house/detail/2/900002.html",
+            },
+        ]
+
+        batch_cache: dict[str, list[dict]] = {}
+        inserted = 0
+        for raw in raws:
+            normalized = normalize_591_listing(raw)
+            decision = storage.insert_listing_with_dedup(
+                normalized, batch_cache=batch_cache, dedup_enabled=True
+            )
+            inserted += 1 if decision["inserted"] else 0
+
+        assert inserted == 1
+        assert storage.get_listing_count() == 1
+    finally:
+        storage.close()

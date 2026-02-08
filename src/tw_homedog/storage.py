@@ -1,9 +1,20 @@
 """SQLite storage for listings and notification tracking."""
 
+from __future__ import annotations
+
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+from tw_homedog.dedup import (
+    DEFAULT_DEDUP_THRESHOLD,
+    DEFAULT_PRICE_TOLERANCE,
+    DEFAULT_SIZE_TOLERANCE,
+    build_entity_fingerprint,
+    score_duplicate,
+)
 
 
 SCHEMA = """
@@ -33,6 +44,7 @@ CREATE TABLE IF NOT EXISTS listings (
     community_name TEXT,
     main_area REAL,
     direction TEXT,
+    entity_fingerprint TEXT,
     is_enriched INTEGER DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(source, listing_id)
@@ -69,13 +81,33 @@ CREATE TABLE IF NOT EXISTS favorites (
     added_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (source, listing_id)
 );
+
+CREATE TABLE IF NOT EXISTS dedup_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    listing_id TEXT,
+    canonical_listing_id TEXT,
+    candidate_ids TEXT,
+    score REAL,
+    reason TEXT,
+    entity_fingerprint TEXT,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedup_audit_created_at
+    ON dedup_audit(created_at);
+CREATE INDEX IF NOT EXISTS idx_dedup_audit_event_type
+    ON dedup_audit(event_type);
 """
 
 
 class Storage:
     def __init__(self, db_path: str):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # check_same_thread=False avoids scheduler/thread callbacks crashing on shared DB handle.
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
@@ -85,7 +117,7 @@ class Storage:
         self._migrate()
 
     def _migrate(self):
-        """Add new columns if they don't exist (for existing DBs)."""
+        """Add new columns/tables/indexes if they don't exist (for existing DBs)."""
         existing = {
             row[1]
             for row in self.conn.execute("PRAGMA table_info(listings)").fetchall()
@@ -99,60 +131,501 @@ class Storage:
             "community_name": "TEXT",
             "main_area": "REAL",
             "direction": "TEXT",
+            "entity_fingerprint": "TEXT",
             "is_enriched": "INTEGER DEFAULT 0",
         }
         for col, col_type in new_columns.items():
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE listings ADD COLUMN {col} {col_type}")
-        # Ensure favorites table exists for older DBs
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_fingerprint "
+            "ON listings(source, entity_fingerprint)"
+        )
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS favorites ("
-            "source TEXT NOT NULL, listing_id TEXT NOT NULL, added_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "source TEXT NOT NULL, listing_id TEXT NOT NULL, "
+            "added_at TEXT NOT NULL DEFAULT (datetime('now')), "
             "PRIMARY KEY (source, listing_id))"
         )
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS dedup_audit ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "event_type TEXT NOT NULL, source TEXT NOT NULL, listing_id TEXT, "
+            "canonical_listing_id TEXT, candidate_ids TEXT, score REAL, reason TEXT, "
+            "entity_fingerprint TEXT, metadata TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dedup_audit_created_at "
+            "ON dedup_audit(created_at)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dedup_audit_event_type "
+            "ON dedup_audit(event_type)"
+        )
+        # Recompute fingerprints to keep old rows aligned with latest fingerprint rules.
+        self.backfill_entity_fingerprints(recompute_existing=True)
+        self.conn.commit()
+
+    def backfill_entity_fingerprints(
+        self,
+        *,
+        source: str | None = None,
+        recompute_existing: bool = False,
+        limit: int | None = None,
+    ) -> int:
+        """Populate/recompute entity fingerprint for historical rows."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if not recompute_existing:
+            conditions.append("(entity_fingerprint IS NULL OR entity_fingerprint = '')")
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM listings {where_clause} ORDER BY id ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+
+        rows = self.conn.execute(sql, params).fetchall()
+        updated = 0
+        for row in rows:
+            listing = dict(row)
+            fingerprint = build_entity_fingerprint(listing)
+            if not fingerprint:
+                continue
+            if listing.get("entity_fingerprint") == fingerprint:
+                continue
+            self.conn.execute(
+                "UPDATE listings SET entity_fingerprint = ? WHERE id = ?",
+                (fingerprint, listing["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
+    def _normalize_listing(self, listing: dict) -> dict:
+        normalized = dict(listing)
+        normalized["source"] = str(normalized.get("source") or "591")
+        normalized["listing_id"] = str(normalized.get("listing_id") or "")
+        if not normalized.get("entity_fingerprint"):
+            normalized["entity_fingerprint"] = build_entity_fingerprint(normalized)
+        return normalized
+
+    def _insert_listing_row(self, listing: dict) -> None:
+        self.conn.execute(
+            """INSERT INTO listings
+               (source, listing_id, title, price, address, district,
+                size_ping, floor, url, published_at, raw_hash, houseage,
+                unit_price, kind_name, room, tags, community_name, entity_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                listing["source"],
+                listing["listing_id"],
+                listing.get("title"),
+                listing.get("price"),
+                listing.get("address"),
+                listing.get("district"),
+                listing.get("size_ping"),
+                listing.get("floor"),
+                listing.get("url"),
+                listing.get("published_at"),
+                listing.get("raw_hash"),
+                listing.get("houseage"),
+                listing.get("unit_price"),
+                listing.get("kind_name"),
+                listing.get("room"),
+                json.dumps(listing.get("tags") or [], ensure_ascii=False),
+                listing.get("community_name"),
+                listing.get("entity_fingerprint"),
+            ),
+        )
+
+    def insert_listing_with_dedup(
+        self,
+        listing: dict,
+        *,
+        batch_cache: dict[str, list[dict]] | None = None,
+        dedup_enabled: bool = False,
+        dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
+        price_tolerance: float = DEFAULT_PRICE_TOLERANCE,
+        size_tolerance: float = DEFAULT_SIZE_TOLERANCE,
+    ) -> dict[str, Any]:
+        """Insert listing and return dedup decision."""
+        listing = self._normalize_listing(listing)
+        source = listing["source"]
+        listing_id = listing["listing_id"]
+        fingerprint = listing.get("entity_fingerprint")
+        result: dict[str, Any] = {
+            "inserted": False,
+            "reason": "",
+            "score": None,
+            "canonical_listing_id": None,
+            "entity_fingerprint": fingerprint,
+        }
+
+        existing_id = self.conn.execute(
+            "SELECT listing_id FROM listings WHERE source = ? AND listing_id = ?",
+            (source, listing_id),
+        ).fetchone()
+        if existing_id:
+            result["reason"] = "duplicate_listing_id"
+            result["canonical_listing_id"] = existing_id["listing_id"]
+            self.record_dedup_decision(
+                event_type="skip",
+                source=source,
+                listing_id=listing_id,
+                canonical_listing_id=existing_id["listing_id"],
+                candidate_ids=[existing_id["listing_id"]],
+                score=1.0,
+                reason=result["reason"],
+                entity_fingerprint=fingerprint,
+            )
+            return result
+
+        if listing.get("raw_hash"):
+            existing_hash = self.conn.execute(
+                "SELECT listing_id, source FROM listings WHERE raw_hash = ? LIMIT 1",
+                (listing["raw_hash"],),
+            ).fetchone()
+            if existing_hash:
+                result["reason"] = "duplicate_raw_hash"
+                result["canonical_listing_id"] = existing_hash["listing_id"]
+                self.record_dedup_decision(
+                    event_type="skip",
+                    source=source,
+                    listing_id=listing_id,
+                    canonical_listing_id=existing_hash["listing_id"],
+                    candidate_ids=[existing_hash["listing_id"]],
+                    score=1.0,
+                    reason=result["reason"],
+                    entity_fingerprint=fingerprint,
+                )
+                return result
+
+        if dedup_enabled and fingerprint:
+            best_score = 0.0
+            best_candidate: dict[str, Any] | None = None
+
+            db_candidates = self.get_dedup_candidates(source, fingerprint)
+            for candidate in db_candidates:
+                scored = score_duplicate(
+                    listing,
+                    candidate,
+                    price_tolerance=price_tolerance,
+                    size_tolerance=size_tolerance,
+                )
+                if scored.score > best_score:
+                    best_score = scored.score
+                    best_candidate = {
+                        "listing_id": candidate["listing_id"],
+                        "reason": scored.reason,
+                        "score": scored.score,
+                    }
+
+            if batch_cache:
+                for candidate in batch_cache.get(fingerprint, []):
+                    scored = score_duplicate(
+                        listing,
+                        candidate,
+                        price_tolerance=price_tolerance,
+                        size_tolerance=size_tolerance,
+                    )
+                    if scored.score > best_score:
+                        best_score = scored.score
+                        best_candidate = {
+                            "listing_id": candidate.get("listing_id"),
+                            "reason": f"batch:{scored.reason}",
+                            "score": scored.score,
+                        }
+
+            if best_candidate and best_score >= dedup_threshold:
+                result["reason"] = "duplicate_entity"
+                result["score"] = round(best_score, 4)
+                result["canonical_listing_id"] = best_candidate["listing_id"]
+                self.record_dedup_decision(
+                    event_type="skip",
+                    source=source,
+                    listing_id=listing_id,
+                    canonical_listing_id=best_candidate["listing_id"],
+                    candidate_ids=[best_candidate["listing_id"]],
+                    score=best_score,
+                    reason=best_candidate["reason"],
+                    entity_fingerprint=fingerprint,
+                )
+                return result
+
+        try:
+            self._insert_listing_row(listing)
+            self.conn.commit()
+            if batch_cache is not None and fingerprint:
+                batch_cache.setdefault(fingerprint, []).append(dict(listing))
+            result["inserted"] = True
+            result["reason"] = "inserted"
+            return result
+        except sqlite3.IntegrityError:
+            result["reason"] = "duplicate_integrity"
+            return result
 
     def insert_listing(self, listing: dict) -> bool:
         """Insert a listing if not duplicate. Returns True if inserted."""
-        # Check content hash duplicate
-        if listing.get("raw_hash"):
-            existing = self.conn.execute(
-                "SELECT 1 FROM listings WHERE raw_hash = ?",
-                (listing["raw_hash"],),
-            ).fetchone()
-            if existing:
-                return False
+        return bool(self.insert_listing_with_dedup(listing)["inserted"])
 
-        try:
-            self.conn.execute(
-                """INSERT INTO listings
-                   (source, listing_id, title, price, address, district,
-                    size_ping, floor, url, published_at, raw_hash,
-                    houseage, unit_price, kind_name, room, tags, community_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    listing["source"],
-                    listing["listing_id"],
-                    listing.get("title"),
-                    listing.get("price"),
-                    listing.get("address"),
-                    listing.get("district"),
-                    listing.get("size_ping"),
-                    listing.get("floor"),
-                    listing.get("url"),
-                    listing.get("published_at"),
-                    listing.get("raw_hash"),
-                    listing.get("houseage"),
-                    listing.get("unit_price"),
-                    listing.get("kind_name"),
-                    listing.get("room"),
-                    json.dumps(listing.get("tags") or [], ensure_ascii=False),
-                    listing.get("community_name"),
-                ),
-            )
-            self.conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
+    def get_dedup_candidates(
+        self,
+        source: str,
+        entity_fingerprint: str,
+        *,
+        exclude_listing_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        if not entity_fingerprint:
+            return []
+        params: list[Any] = [source, entity_fingerprint]
+        sql = (
+            "SELECT * FROM listings WHERE source = ? AND entity_fingerprint = ?"
+        )
+        if exclude_listing_id:
+            sql += " AND listing_id != ?"
+            params.append(exclude_listing_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_dedup_decision(
+        self,
+        *,
+        event_type: str,
+        source: str,
+        listing_id: str | None,
+        canonical_listing_id: str | None = None,
+        candidate_ids: list[str] | None = None,
+        score: float | None = None,
+        reason: str | None = None,
+        entity_fingerprint: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO dedup_audit
+               (event_type, source, listing_id, canonical_listing_id, candidate_ids, score,
+                reason, entity_fingerprint, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_type,
+                source,
+                listing_id,
+                canonical_listing_id,
+                json.dumps(candidate_ids or [], ensure_ascii=False),
+                score,
+                reason,
+                entity_fingerprint,
+                json.dumps(metadata or {}, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_relation_counts(
+        self,
+        source: str,
+        listing_ids: list[str],
+    ) -> dict[str, dict[str, int]]:
+        if not listing_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in listing_ids)
+        params = [source] + listing_ids
+        counts = {
+            lid: {"notifications": 0, "reads": 0, "favorites": 0}
+            for lid in listing_ids
+        }
+
+        notif_rows = self.conn.execute(
+            f"""SELECT listing_id, COUNT(*) AS c FROM notifications_sent
+                WHERE source = ? AND listing_id IN ({placeholders})
+                GROUP BY listing_id""",
+            params,
+        ).fetchall()
+        for row in notif_rows:
+            counts[row["listing_id"]]["notifications"] = int(row["c"])
+
+        read_rows = self.conn.execute(
+            f"""SELECT listing_id, COUNT(*) AS c FROM listings_read
+                WHERE source = ? AND listing_id IN ({placeholders})
+                GROUP BY listing_id""",
+            params,
+        ).fetchall()
+        for row in read_rows:
+            counts[row["listing_id"]]["reads"] = int(row["c"])
+
+        fav_rows = self.conn.execute(
+            f"""SELECT listing_id, COUNT(*) AS c FROM favorites
+                WHERE source = ? AND listing_id IN ({placeholders})
+                GROUP BY listing_id""",
+            params,
+        ).fetchall()
+        for row in fav_rows:
+            counts[row["listing_id"]]["favorites"] = int(row["c"])
+
+        return counts
+
+    def merge_duplicate_group(
+        self,
+        *,
+        source: str,
+        canonical_listing_id: str,
+        duplicate_listing_ids: list[str],
+        score: float | None = None,
+        reason: str = "cleanup_merge",
+        entity_fingerprint: str | None = None,
+    ) -> int:
+        """Merge duplicate listings into canonical one inside a transaction."""
+        if not duplicate_listing_ids:
+            return 0
+
+        duplicate_listing_ids = [
+            str(lid)
+            for lid in duplicate_listing_ids
+            if str(lid) and str(lid) != str(canonical_listing_id)
+        ]
+        if not duplicate_listing_ids:
+            return 0
+
+        canonical = self.conn.execute(
+            "SELECT raw_hash FROM listings WHERE source = ? AND listing_id = ?",
+            (source, canonical_listing_id),
+        ).fetchone()
+        canonical_hash = canonical["raw_hash"] if canonical else None
+
+        with self.conn:
+            for dup in duplicate_listing_ids:
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO notifications_sent (listing_id, source, channel, notified_at)
+                       SELECT ?, source, channel, notified_at
+                       FROM notifications_sent WHERE source = ? AND listing_id = ?""",
+                    (canonical_listing_id, source, dup),
+                )
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO listings_read (source, listing_id, raw_hash, read_at)
+                       SELECT source, ?, ?, read_at
+                       FROM listings_read WHERE source = ? AND listing_id = ?""",
+                    (canonical_listing_id, canonical_hash, source, dup),
+                )
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO favorites (source, listing_id, added_at)
+                       SELECT source, ?, added_at
+                       FROM favorites WHERE source = ? AND listing_id = ?""",
+                    (canonical_listing_id, source, dup),
+                )
+
+                self.conn.execute(
+                    "DELETE FROM notifications_sent WHERE source = ? AND listing_id = ?",
+                    (source, dup),
+                )
+                self.conn.execute(
+                    "DELETE FROM listings_read WHERE source = ? AND listing_id = ?",
+                    (source, dup),
+                )
+                self.conn.execute(
+                    "DELETE FROM favorites WHERE source = ? AND listing_id = ?",
+                    (source, dup),
+                )
+                self.conn.execute(
+                    "DELETE FROM listings WHERE source = ? AND listing_id = ?",
+                    (source, dup),
+                )
+
+                self.conn.execute(
+                    """INSERT INTO dedup_audit
+                       (event_type, source, listing_id, canonical_listing_id, candidate_ids, score,
+                        reason, entity_fingerprint, metadata, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        "merge",
+                        source,
+                        dup,
+                        canonical_listing_id,
+                        json.dumps([dup], ensure_ascii=False),
+                        score,
+                        reason,
+                        entity_fingerprint,
+                        json.dumps({}, ensure_ascii=False),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+
+        return len(duplicate_listing_ids)
+
+    def get_duplicate_fingerprint_groups(
+        self,
+        source: str = "591",
+        min_group_size: int = 2,
+    ) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT entity_fingerprint, COUNT(*) AS group_count
+               FROM listings
+               WHERE source = ? AND entity_fingerprint IS NOT NULL AND entity_fingerprint != ''
+               GROUP BY entity_fingerprint
+               HAVING COUNT(*) >= ?
+               ORDER BY group_count DESC, entity_fingerprint ASC""",
+            (source, min_group_size),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_all_listings(self, source: str = "591") -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM listings WHERE source = ? ORDER BY created_at DESC, id DESC",
+            (source,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_listings_by_fingerprint(self, source: str, entity_fingerprint: str) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT * FROM listings
+               WHERE source = ? AND entity_fingerprint = ?
+               ORDER BY created_at DESC, listing_id DESC""",
+            (source, entity_fingerprint),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_dedup_audit_recent(self, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM dedup_audit ORDER BY created_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def validate_relation_integrity(self) -> dict[str, int]:
+        """Return orphan counts for relation tables that reference non-existing listings."""
+        checks = {
+            "notifications_sent": self.conn.execute(
+                """SELECT COUNT(*) AS c
+                   FROM notifications_sent n
+                   LEFT JOIN listings l
+                     ON l.source = n.source AND l.listing_id = n.listing_id
+                   WHERE l.listing_id IS NULL"""
+            ).fetchone()["c"],
+            "listings_read": self.conn.execute(
+                """SELECT COUNT(*) AS c
+                   FROM listings_read r
+                   LEFT JOIN listings l
+                     ON l.source = r.source AND l.listing_id = r.listing_id
+                   WHERE l.listing_id IS NULL"""
+            ).fetchone()["c"],
+            "favorites": self.conn.execute(
+                """SELECT COUNT(*) AS c
+                   FROM favorites f
+                   LEFT JOIN listings l
+                     ON l.source = f.source AND l.listing_id = f.listing_id
+                   WHERE l.listing_id IS NULL"""
+            ).fetchone()["c"],
+        }
+        return {k: int(v) for k, v in checks.items()}
 
     def is_notified(self, source: str, listing_id: str, channel: str = "telegram") -> bool:
         """Check if a listing has already been notified."""
@@ -296,7 +769,7 @@ class Storage:
                    ON CONFLICT(source, listing_id)
                    DO UPDATE SET raw_hash = excluded.raw_hash, read_at = excluded.read_at""",
                 (source, lid, hash_map.get(lid), now),
-        )
+            )
         self.conn.commit()
 
     def get_unread_count(self) -> int:

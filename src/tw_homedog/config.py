@@ -43,6 +43,11 @@ DEFAULTS = {
     "maps.cache_ttl_seconds": 86400,
     "maps.cache_dir": "data/map_cache",
     "maps.style": None,
+    "dedup.enabled": True,
+    "dedup.threshold": 0.82,
+    "dedup.price_tolerance": 0.05,
+    "dedup.size_tolerance": 0.08,
+    "dedup.cleanup_batch_size": 200,
 }
 
 
@@ -79,6 +84,15 @@ class ScraperConfig:
 
 
 @dataclass
+class DedupConfig:
+    enabled: bool = True
+    threshold: float = 0.82
+    price_tolerance: float = 0.05
+    size_tolerance: float = 0.08
+    cleanup_batch_size: int = 200
+
+
+@dataclass
 class Config:
     search: SearchConfig
     telegram: TelegramConfig
@@ -90,6 +104,7 @@ class Config:
             api_key=None,
         )
     )
+    dedup: DedupConfig = field(default_factory=DedupConfig)
 
 
 def _get_nested(data: dict, dotted_key: str):
@@ -177,6 +192,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     telegram = raw.get("telegram", {})
     scraper_raw = raw.get("scraper", {})
     maps_raw = raw.get("maps", {})
+    dedup_raw = raw.get("dedup", {})
     size = search.get("size", {})
     keywords = search.get("keywords", {})
 
@@ -256,5 +272,14 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             cache_ttl_seconds=maps_raw.get("cache_ttl_seconds", DEFAULTS["maps.cache_ttl_seconds"]),
             cache_dir=maps_raw.get("cache_dir", DEFAULTS["maps.cache_dir"]),
             style=maps_raw.get("style", DEFAULTS["maps.style"]),
+        ),
+        dedup=DedupConfig(
+            enabled=dedup_raw.get("enabled", DEFAULTS["dedup.enabled"]),
+            threshold=dedup_raw.get("threshold", DEFAULTS["dedup.threshold"]),
+            price_tolerance=dedup_raw.get("price_tolerance", DEFAULTS["dedup.price_tolerance"]),
+            size_tolerance=dedup_raw.get("size_tolerance", DEFAULTS["dedup.size_tolerance"]),
+            cleanup_batch_size=dedup_raw.get(
+                "cleanup_batch_size", DEFAULTS["dedup.cleanup_batch_size"]
+            ),
         ),
     )

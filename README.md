@@ -76,6 +76,51 @@ uv run python -m tw_homedog cli notify
 
 首次啟動時傳送 `/start` 開始設定引導，之後隨時可用 `/settings` 修改任何參數。
 
+## Listing Deduplication
+
+系統會在寫入前用 `entity_fingerprint + 相似度分數` 做去重，避免同一間房被多位房仲重複入庫。
+
+### Dedup Tuning Knobs
+
+可在 `config.yaml` 的 `dedup` 區塊調整：
+
+```yaml
+dedup:
+  enabled: true
+  threshold: 0.82
+  price_tolerance: 0.05
+  size_tolerance: 0.08
+  cleanup_batch_size: 200
+```
+
+- `threshold`: 越高越保守（降低誤刪，可能漏掉部分重複）。
+- `price_tolerance` / `size_tolerance`: 允許同屋在不同刊登間的價格/坪數微幅差異。
+- `cleanup_batch_size`: 每次清理最多處理群組數量，建議先小批次。
+
+### Historical Cleanup (Dry-run / Apply)
+
+先跑 dry-run 看預估合併群組，再決定是否 apply：
+
+```bash
+# 預設 dry-run（不改資料）
+uv run python -m tw_homedog cli dedup-cleanup
+
+# 調整門檻
+uv run python -m tw_homedog cli dedup-cleanup --threshold 0.85 --batch-size 100
+
+# 套用清理
+uv run python -m tw_homedog cli dedup-cleanup --apply
+```
+
+### Operations Playbook
+
+1. 先備份 DB：`sqlite3 data/homedog.db ".backup data/homedog-backup.db"`  
+2. 執行 dry-run，檢查合併群組是否合理（抽樣看 false positive / false negative）。  
+3. 以小批次 `--batch-size` 套用；每個群組在單一 transaction 合併關聯（`notifications_sent`、`listings_read`、`favorites`）。  
+4. 套用後再跑一次 dry-run，確認剩餘重複量與關聯完整性。  
+
+Pipeline 日誌會輸出去重計數：`inserted`、`skipped_duplicate`、`merged`、`cleanup_failed`。
+
 ## Telegram 縮圖（Google Maps）
 
 個人用量通常 <10k 次/月，Google Maps Static Maps + Geocoding 都有每月 10,000 次免費額度，超出後才計費。  

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from tw_homedog.config import Config, ScraperConfig, SearchConfig, TelegramConfig
+from tw_homedog.config import Config, DedupConfig, ScraperConfig, SearchConfig, TelegramConfig
 from tw_homedog.map_preview import MapConfig
 from tw_homedog.regions import EN_TO_ZH
 
@@ -50,6 +50,11 @@ DEFAULTS = {
     "maps.cache_ttl_seconds": 86400,
     "maps.cache_dir": "data/map_cache",
     "maps.style": None,
+    "dedup.enabled": True,
+    "dedup.threshold": 0.82,
+    "dedup.price_tolerance": 0.05,
+    "dedup.size_tolerance": 0.08,
+    "dedup.cleanup_batch_size": 200,
 }
 
 
@@ -233,6 +238,17 @@ class DbConfig:
                 cache_dir=_get("maps.cache_dir", DEFAULTS["maps.cache_dir"]),
                 style=_get("maps.style", DEFAULTS["maps.style"]),
             ),
+            dedup=DedupConfig(
+                enabled=_get("dedup.enabled", DEFAULTS["dedup.enabled"]),
+                threshold=_get("dedup.threshold", DEFAULTS["dedup.threshold"]),
+                price_tolerance=_get(
+                    "dedup.price_tolerance", DEFAULTS["dedup.price_tolerance"]
+                ),
+                size_tolerance=_get("dedup.size_tolerance", DEFAULTS["dedup.size_tolerance"]),
+                cleanup_batch_size=_get(
+                    "dedup.cleanup_batch_size", DEFAULTS["dedup.cleanup_batch_size"]
+                ),
+            ),
         )
 
     def migrate_from_yaml(self, path: str | Path) -> int:
@@ -298,6 +314,17 @@ class DbConfig:
         for key in ("delay_min", "delay_max", "timeout", "max_retries"):
             if key in scraper:
                 items[f"scraper.{key}"] = scraper[key]
+
+        dedup = raw.get("dedup", {})
+        for key in (
+            "enabled",
+            "threshold",
+            "price_tolerance",
+            "size_tolerance",
+            "cleanup_batch_size",
+        ):
+            if key in dedup:
+                items[f"dedup.{key}"] = dedup[key]
 
         self.set_many(items)
         logger.info("Migrated %d config keys from %s", len(items), path)

@@ -3,6 +3,8 @@
 import hashlib
 import re
 
+from tw_homedog.dedup import build_entity_fingerprint
+
 
 def extract_price(raw_price: str | int | float | None) -> int | None:
     """Extract integer price from various formats.
@@ -39,7 +41,7 @@ def normalize_591_listing(raw: dict) -> dict:
         except (ValueError, TypeError):
             size_ping = None
 
-    return {
+    normalized = {
         "source": "591",
         "listing_id": str(raw.get("id") or raw.get("listing_id", "")),
         "title": title,
@@ -58,3 +60,5 @@ def normalize_591_listing(raw: dict) -> dict:
         "tags": raw.get("tags") or [],
         "community_name": raw.get("community_name"),
     }
+    normalized["entity_fingerprint"] = build_entity_fingerprint(normalized)
+    return normalized

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from tw_homedog.config import load_config
+from tw_homedog.dedup_cleanup import run_cleanup
 from tw_homedog.log import setup_logging
 from tw_homedog.matcher import find_matching_listings
 from tw_homedog.normalizer import normalize_591_listing
@@ -31,11 +32,36 @@ def cmd_scrape(config):
     try:
         raw_listings = scrape_listings(config)
         new_count = 0
+        dedup_metrics = {
+            "inserted": 0,
+            "skipped_duplicate": 0,
+            "merged": 0,
+            "cleanup_failed": 0,
+        }
+        batch_cache: dict[str, list[dict]] = {}
         for raw in raw_listings:
             normalized = normalize_591_listing(raw)
-            if storage.insert_listing(normalized):
+            decision = storage.insert_listing_with_dedup(
+                normalized,
+                batch_cache=batch_cache,
+                dedup_enabled=config.dedup.enabled,
+                dedup_threshold=config.dedup.threshold,
+                price_tolerance=config.dedup.price_tolerance,
+                size_tolerance=config.dedup.size_tolerance,
+            )
+            if decision["inserted"]:
                 new_count += 1
+                dedup_metrics["inserted"] += 1
+            else:
+                dedup_metrics["skipped_duplicate"] += 1
         logger.info("Scrape complete: %d new listings stored (out of %d scraped)", new_count, len(raw_listings))
+        logger.info(
+            "Dedup metrics: inserted=%d skipped_duplicate=%d merged=%d cleanup_failed=%d",
+            dedup_metrics["inserted"],
+            dedup_metrics["skipped_duplicate"],
+            dedup_metrics["merged"],
+            dedup_metrics["cleanup_failed"],
+        )
         return new_count
     finally:
         storage.close()
@@ -105,6 +131,44 @@ def cmd_run(config):
     return 0
 
 
+def cmd_dedup_cleanup(
+    config,
+    *,
+    dry_run: bool,
+    threshold: float | None,
+    price_tolerance: float | None,
+    size_tolerance: float | None,
+    batch_size: int | None,
+):
+    """Run historical dedup cleanup."""
+    storage = Storage(config.database_path)
+    try:
+        report = run_cleanup(
+            storage,
+            dry_run=dry_run,
+            threshold=threshold if threshold is not None else config.dedup.threshold,
+            price_tolerance=(
+                price_tolerance if price_tolerance is not None else config.dedup.price_tolerance
+            ),
+            size_tolerance=(
+                size_tolerance if size_tolerance is not None else config.dedup.size_tolerance
+            ),
+            batch_size=batch_size if batch_size is not None else config.dedup.cleanup_batch_size,
+        )
+        logger.info(
+            "Dedup cleanup (%s): groups=%d projected=%d merged=%d failed=%d validation=%s",
+            "dry-run" if dry_run else "apply",
+            report["groups"],
+            report["projected_merge_records"],
+            report["merged_records"],
+            report["cleanup_failed"],
+            report.get("validation", {}),
+        )
+        return 0
+    finally:
+        storage.close()
+
+
 # =============================================================================
 # CLI mode entry point
 # =============================================================================
@@ -124,6 +188,18 @@ def cli_main():
     subparsers.add_parser("run", help="Full pipeline: scrape → match → notify")
     subparsers.add_parser("scrape", help="Scrape and store listings only")
     subparsers.add_parser("notify", help="Match and send notifications only")
+    cleanup_parser = subparsers.add_parser(
+        "dedup-cleanup", help="Cleanup historical duplicate listings"
+    )
+    cleanup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply cleanup changes (default: dry-run only)",
+    )
+    cleanup_parser.add_argument("--threshold", type=float, default=None)
+    cleanup_parser.add_argument("--price-tolerance", type=float, default=None)
+    cleanup_parser.add_argument("--size-tolerance", type=float, default=None)
+    cleanup_parser.add_argument("--batch-size", type=int, default=None)
 
     args = parser.parse_args(sys.argv[2:])  # skip 'cli' from sys.argv
 
@@ -133,12 +209,22 @@ def cli_main():
         logger.error("%s", e)
         sys.exit(1)
 
-    commands = {
-        "run": cmd_run,
-        "scrape": cmd_scrape,
-        "notify": cmd_notify,
-    }
-    result = commands[args.command](config)
+    if args.command == "dedup-cleanup":
+        result = cmd_dedup_cleanup(
+            config,
+            dry_run=not args.apply,
+            threshold=args.threshold,
+            price_tolerance=args.price_tolerance,
+            size_tolerance=args.size_tolerance,
+            batch_size=args.batch_size,
+        )
+    else:
+        commands = {
+            "run": cmd_run,
+            "scrape": cmd_scrape,
+            "notify": cmd_notify,
+        }
+        result = commands[args.command](config)
 
     if args.command == "run" and result != 0:
         sys.exit(result)

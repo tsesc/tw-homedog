@@ -24,6 +24,7 @@ from telegram.ext import (
 )
 
 from tw_homedog.db_config import DbConfig
+from tw_homedog.dedup_cleanup import run_cleanup
 from tw_homedog.log import set_log_level
 from tw_homedog.matcher import find_matching_listings
 from tw_homedog.normalizer import normalize_591_listing
@@ -94,6 +95,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int |
             "/status - 查看狀態\n"
             "/favorites - 查看最愛\n"
             "/run - 手動執行\n"
+            "/dedupall - 全庫去重\n"
             "/pause - 暫停排程\n"
             "/resume - 恢復排程\n"
             "/loglevel - 調整日誌等級\n"
@@ -379,7 +381,8 @@ async def setup_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
         "可用指令：\n"
         "/settings - 修改設定\n"
         "/status - 查看狀態\n"
-        "/run - 手動執行"
+        "/run - 手動執行\n"
+        "/dedupall - 全庫去重"
     )
 
     # Start scheduler if not already running
@@ -475,6 +478,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/settings - 修改設定\n"
         "/status - 查看狀態\n"
         "/run - 手動執行\n"
+        "/dedupall - 全庫去重\n"
         "/pause - 暫停排程\n"
         "/resume - 恢復排程\n"
         "/loglevel - 調整日誌等級\n"
@@ -534,6 +538,135 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("開始執行...")
     result = await _run_pipeline(context)
     await update.message.reply_text(result)
+
+
+async def cmd_dedupall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /dedupall command — apply dedup cleanup until no groups remain."""
+    global _pipeline_running
+    if _pipeline_running:
+        await update.message.reply_text("目前有任務執行中，請稍候再試")
+        return
+
+    storage: Storage = context.bot_data["storage"]
+    db_config: DbConfig = context.bot_data["db_config"]
+
+    batch_size = db_config.get("dedup.cleanup_batch_size", 200)
+    if context.args:
+        try:
+            batch_size = int(context.args[0])
+            if batch_size <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("用法：/dedupall [batch_size]\n例如：/dedupall 100")
+            return
+
+    try:
+        config = db_config.build_config()
+        threshold = config.dedup.threshold
+        price_tolerance = config.dedup.price_tolerance
+        size_tolerance = config.dedup.size_tolerance
+    except ValueError:
+        threshold = db_config.get("dedup.threshold", 0.82)
+        price_tolerance = db_config.get("dedup.price_tolerance", 0.05)
+        size_tolerance = db_config.get("dedup.size_tolerance", 0.08)
+
+    paused_before = db_config.get("scheduler.paused", False)
+    if not paused_before:
+        for job in context.job_queue.get_jobs_by_name("pipeline"):
+            job.schedule_removal()
+
+    _pipeline_running = True
+    started_at = datetime.now(timezone.utc)
+    rounds = 0
+    total_merged = 0
+    total_failed = 0
+    last_validation: dict = {}
+    max_rounds = 500
+
+    try:
+        initial = await asyncio.to_thread(
+            run_cleanup,
+            storage,
+            dry_run=True,
+            threshold=threshold,
+            price_tolerance=price_tolerance,
+            size_tolerance=size_tolerance,
+            batch_size=1_000_000,
+        )
+        await update.message.reply_text(
+            f"開始全庫去重（batch_size={batch_size}）\n"
+            f"目前待處理：{initial['groups']} 組 / {initial['projected_merge_records']} 筆"
+        )
+
+        while rounds < max_rounds:
+            rounds += 1
+            report = await asyncio.to_thread(
+                run_cleanup,
+                storage,
+                dry_run=False,
+                threshold=threshold,
+                price_tolerance=price_tolerance,
+                size_tolerance=size_tolerance,
+                batch_size=batch_size,
+            )
+            total_merged += int(report.get("merged_records", 0))
+            total_failed += int(report.get("cleanup_failed", 0))
+            last_validation = report.get("validation", {}) or {}
+
+            remaining = await asyncio.to_thread(
+                run_cleanup,
+                storage,
+                dry_run=True,
+                threshold=threshold,
+                price_tolerance=price_tolerance,
+                size_tolerance=size_tolerance,
+                batch_size=1_000_000,
+            )
+            remaining_groups = int(remaining.get("groups", 0))
+            remaining_records = int(remaining.get("projected_merge_records", 0))
+
+            await update.message.reply_text(
+                f"第 {rounds} 輪完成：合併 {report['merged_records']} 筆，"
+                f"失敗 {report['cleanup_failed']}，剩餘 {remaining_groups} 組 / {remaining_records} 筆"
+            )
+
+            if remaining_groups == 0:
+                break
+            if report["groups"] == 0 or report["merged_records"] == 0:
+                await update.message.reply_text(
+                    "提前停止：本輪沒有新的合併結果，請調整門檻後再重試。"
+                )
+                break
+            if report["cleanup_failed"] > 0:
+                await update.message.reply_text("偵測到 cleanup failed，已停止以避免持續失敗。")
+                break
+
+        duration = (datetime.now(timezone.utc) - started_at).total_seconds()
+        final_dry = await asyncio.to_thread(
+            run_cleanup,
+            storage,
+            dry_run=True,
+            threshold=threshold,
+            price_tolerance=price_tolerance,
+            size_tolerance=size_tolerance,
+            batch_size=1_000_000,
+        )
+        await update.message.reply_text(
+            "去重完成\n"
+            f"輪次：{rounds}\n"
+            f"總合併：{total_merged} 筆\n"
+            f"總失敗：{total_failed}\n"
+            f"剩餘：{final_dry['groups']} 組 / {final_dry['projected_merge_records']} 筆\n"
+            f"關聯驗證：{last_validation}\n"
+            f"耗時：{duration:.1f}s"
+        )
+    except Exception as e:
+        logger.error("dedupall failed: %s", e, exc_info=True)
+        await update.message.reply_text(f"去重失敗：{e}")
+    finally:
+        _pipeline_running = False
+        if not paused_before:
+            _ensure_scheduler(context)
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1269,12 +1402,61 @@ def _build_list_keyboard(
 ) -> InlineKeyboardMarkup:
     """Build paginated listing list inline keyboard."""
     buttons = []
+
+    def _clip(text: str, limit: int = 64) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3] + "..."
+
+    def _guess_community_name(title: str) -> str | None:
+        if not title:
+            return None
+        cleaned = title.strip()
+
+        # Explicit community labels first
+        m = re.search(r"([\w\u4e00-\u9fff]{2,20}社區)", cleaned)
+        if m:
+            return m.group(1)
+        m = re.search(r"社區\s*([\w\u4e00-\u9fff]{2,20})", cleaned)
+        if m:
+            return m.group(1)
+
+        segments = [
+            seg.strip("👉· ")
+            for seg in re.split(r"[~～｜|／/!！?？,，:：\-—]+", cleaned)
+            if seg.strip("👉· ")
+        ]
+        stop_prefixes = (
+            "屋主誠售",
+            "我是承辦",
+            "近中研院",
+            "近國泰醫院",
+            "近捷運",
+            "獨家",
+            "專任",
+            "急售",
+            "低總價",
+        )
+        for seg in segments:
+            candidate = seg
+            for p in stop_prefixes:
+                if candidate.startswith(p):
+                    candidate = candidate[len(p):].strip()
+            candidate = re.sub(
+                r"(電梯.*|車位.*|套房.*|[一二三四五六七八九十0-9]+房.*)$",
+                "",
+                candidate,
+            ).strip("👉· ")
+            if 2 <= len(candidate) <= 16 and re.search(r"[\u4e00-\u9fff]", candidate):
+                return candidate
+        return None
+
     def _fill_location_fields(listing: dict):
         if not listing.get("community_name"):
             title = listing.get("title") or ""
-            m = re.search(r"([\w\u4e00-\u9fff]+社區)", title)
-            if m:
-                listing["community_name"] = m.group(1)
+            guessed = _guess_community_name(title)
+            if guessed:
+                listing["community_name"] = guessed
     for listing in listings:
         _fill_location_fields(listing)
         district = listing.get("district") or "?"
@@ -1291,24 +1473,25 @@ def _build_list_keyboard(
         age = listing.get("houseage") or ""
         title = listing.get("title") or ""
 
-        location_str = " / ".join([p for p in (community, address) if p])
-        label_parts = [
-            district,
-            price_str,
-            size_str,
-            location_str,
-            layout,
-            age,
-        ]
-        label_main = " · ".join([p for p in label_parts if p])
+        title_str = _clip(title, 26)
+        community_str = _clip(f"社區 {community}", 20) if community else "社區 未提供"
+        address_str = _clip(address, 20) if address else ""
+
+        label_main = " · ".join([p for p in (title_str, community_str) if p])
         prefix = ""
         if listing.get("is_favorite"):
             prefix += "⭐ "
         if listing.get("is_read"):
             prefix += "✅ "
-        label_main = prefix + label_main
+        label_main = _clip(prefix + label_main, 64)
         buttons.append([InlineKeyboardButton(
             label_main, callback_data=f"{context}:d:{listing['listing_id']}"
+        )])
+
+        detail_parts = [district, price_str, size_str, layout, age, address_str]
+        label_detail = _clip(" · ".join([p for p in detail_parts if p]), 64)
+        buttons.append([InlineKeyboardButton(
+            label_detail, callback_data=f"{context}:d:{listing['listing_id']}"
         )])
 
     # Navigation row
@@ -1673,6 +1856,12 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
     scraped = 0
     new_count = 0
     matched_count = 0
+    dedup_metrics = {
+        "inserted": 0,
+        "skipped_duplicate": 0,
+        "merged": 0,
+        "cleanup_failed": 0,
+    }
 
     loop = asyncio.get_running_loop()
     bot = context.bot
@@ -1702,14 +1891,31 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
         raw_listings = await asyncio.to_thread(scrape_listings, config, _progress)
         scraped = len(raw_listings)
         _progress(f"爬取完成，共 {scraped} 筆原始物件，開始寫入與過濾")
+        batch_cache: dict[str, list[dict]] = {}
         for raw in raw_listings:
             normalized = normalize_591_listing(raw)
-            if storage.insert_listing(normalized):
+            decision = storage.insert_listing_with_dedup(
+                normalized,
+                batch_cache=batch_cache,
+                dedup_enabled=config.dedup.enabled,
+                dedup_threshold=config.dedup.threshold,
+                price_tolerance=config.dedup.price_tolerance,
+                size_tolerance=config.dedup.size_tolerance,
+            )
+            if decision["inserted"]:
                 new_count += 1
+                dedup_metrics["inserted"] += 1
                 if new_count % 10 == 0:
                     _progress(f"已寫入 {new_count} 筆新物件")
+            else:
+                dedup_metrics["skipped_duplicate"] += 1
 
-        logger.info("Scrape complete: %d new out of %d", new_count, scraped)
+        logger.info(
+            "Scrape complete: %d new out of %d (dedup skipped=%d)",
+            new_count,
+            scraped,
+            dedup_metrics["skipped_duplicate"],
+        )
 
         # Match
         matched = find_matching_listings(config, storage)
@@ -1739,17 +1945,33 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         logger.info(
-            "Pipeline completed: scraped=%d, new=%d, matched=%d, unread=%d, duration=%.1fs",
-            scraped, new_count, matched_count, unread_count, duration,
+            "Pipeline completed: scraped=%d, new=%d, matched=%d, unread=%d, "
+            "inserted=%d, skipped_duplicate=%d, merged=%d, cleanup_failed=%d, duration=%.1fs",
+            scraped,
+            new_count,
+            matched_count,
+            unread_count,
+            dedup_metrics["inserted"],
+            dedup_metrics["skipped_duplicate"],
+            dedup_metrics["merged"],
+            dedup_metrics["cleanup_failed"],
+            duration,
         )
 
         db_config.set("scheduler.last_run_at", start_time.isoformat())
         db_config.set("scheduler.last_run_status", "success")
 
         if unread_count > 0:
-            return f"完成！爬取 {scraped} 筆，新增 {new_count} 筆，有 {unread_count} 筆未讀物件符合條件，使用 /list 查看"
+            return (
+                f"完成！爬取 {scraped} 筆，新增 {new_count} 筆，"
+                f"略過重複 {dedup_metrics['skipped_duplicate']} 筆，"
+                f"有 {unread_count} 筆未讀物件符合條件，使用 /list 查看"
+            )
         else:
-            return f"完成！爬取 {scraped} 筆，新增 {new_count} 筆，目前沒有新的未讀物件"
+            return (
+                f"完成！爬取 {scraped} 筆，新增 {new_count} 筆，"
+                f"略過重複 {dedup_metrics['skipped_duplicate']} 筆，目前沒有新的未讀物件"
+            )
 
     except Exception as e:
         logger.error("Pipeline failed: %s", e, exc_info=True)
@@ -2069,6 +2291,7 @@ def create_application(
     app.add_handler(CommandHandler("status", cmd_status, filters=auth))
     app.add_handler(CommandHandler("help", cmd_help, filters=auth))
     app.add_handler(CommandHandler("run", cmd_run, filters=auth))
+    app.add_handler(CommandHandler("dedupall", cmd_dedupall, filters=auth))
     app.add_handler(CommandHandler("list", cmd_list, filters=auth))
     app.add_handler(CallbackQueryHandler(list_callback, pattern=r"^list:"))
     app.add_handler(CommandHandler("favorites", cmd_favorites, filters=auth))
@@ -2121,6 +2344,7 @@ def run_bot(bot_token: str, chat_id: str, db_path: str) -> None:
             BotCommand("status", "查看狀態"),
             BotCommand("help", "指令列表"),
             BotCommand("run", "手動執行"),
+            BotCommand("dedupall", "全庫去重"),
             BotCommand("pause", "暫停排程"),
             BotCommand("resume", "恢復排程"),
             BotCommand("loglevel", "調整日誌等級"),
