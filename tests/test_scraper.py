@@ -69,6 +69,16 @@ def test_build_search_url_no_min_ping(rent_config):
     assert "area=" not in url
 
 
+def test_build_search_url_with_filters(rent_config):
+    rent_config.search.max_ping = 40
+    rent_config.search.room_counts = [2, 3]
+    rent_config.search.bathroom_counts = [2]
+    url = build_search_url(rent_config, RENT_SECTION_CODES[1]["大安區"])
+    assert "area=20_40" in url
+    assert "room=2,3" in url
+    assert "bath=2" in url
+
+
 def test_rent_section_codes_taipei():
     assert RENT_SECTION_CODES[1]["大安區"] == 7
     assert RENT_SECTION_CODES[1]["中山區"] == 1

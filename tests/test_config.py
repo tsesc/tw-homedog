@@ -130,3 +130,25 @@ def test_defaults_applied(tmp_path, valid_config_data):
     assert cfg.scraper.delay_min == 2
     assert cfg.search.min_ping is None
     assert cfg.search.keywords_include == []
+    assert cfg.search.keywords_exclude == []
+    assert cfg.search.max_ping is None
+    assert cfg.search.room_counts == []
+    assert cfg.search.bathroom_counts == []
+    assert cfg.search.year_built_min is None
+    assert cfg.search.year_built_max is None
+
+
+def test_size_range_validation(tmp_path, valid_config_data):
+    valid_config_data["search"]["size"] = {"min_ping": 50, "max_ping": 40}
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    with pytest.raises(ValueError, match="min_ping must be <=.*max_ping"):
+        load_config(p)
+
+
+def test_year_range_validation(tmp_path, valid_config_data):
+    valid_config_data["search"]["year_built"] = {"min": 2025, "max": 2000}
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.dump(valid_config_data))
+    with pytest.raises(ValueError, match="year_built\\.min must be <=.*year_built\\.max"):
+        load_config(p)

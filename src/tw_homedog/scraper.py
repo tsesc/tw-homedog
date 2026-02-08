@@ -4,6 +4,7 @@ import logging
 import random
 import re
 import time
+from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -94,10 +95,11 @@ def _normalize_buy_listing(item: dict) -> dict:
         "kind_name": item.get("kind_name"),
         "shape_name": item.get("shape_name"),
         "tags": item.get("tag", []),
+        "community_name": item.get("community_name") or item.get("community"),
     }
 
 
-def scrape_buy_listings(config: Config) -> list[dict]:
+def scrape_buy_listings(config: Config, progress_cb=None) -> list[dict]:
     """Scrape 591 buy listings via BFF API."""
     resolved = resolve_districts(config.search.regions[0], config.search.districts, mode="buy")
     district_codes = list(resolved.values())
@@ -123,8 +125,23 @@ def scrape_buy_listings(config: Config) -> list[dict]:
             'regionid': config.search.regions[0],
             'section': section_param,
         }
-        if config.search.min_ping:
-            params['area'] = f'{int(config.search.min_ping)}_'
+        area_min = config.search.min_ping
+        area_max = config.search.max_ping
+        if area_min or area_max:
+            min_part = str(int(area_min)) if area_min else ""
+            max_part = str(int(area_max)) if area_max else ""
+            params['area'] = f'{min_part}_{max_part}'
+        if config.search.room_counts:
+            params['room'] = ",".join(str(r) for r in config.search.room_counts)
+        if config.search.bathroom_counts:
+            params['bath'] = ",".join(str(b) for b in config.search.bathroom_counts)
+        # Convert build year to house age (approx) if needed
+        if config.search.year_built_min or config.search.year_built_max:
+            current_year = datetime.now().year
+            if config.search.year_built_max:
+                params['age_min'] = max(0, current_year - config.search.year_built_max)
+            if config.search.year_built_min:
+                params['age_max'] = max(0, current_year - config.search.year_built_min)
         params['firstRow'] = first_row
 
         logger.info("Fetching buy listings page %d (firstRow=%d)", page_num + 1, first_row)
@@ -154,6 +171,11 @@ def scrape_buy_listings(config: Config) -> list[dict]:
                 if item.get('is_community') or item.get('is_newhouse'):
                     continue
                 all_listings.append(_normalize_buy_listing(item))
+
+            if progress_cb:
+                progress_cb(
+                    f"買房 page {page_num + 1}: +{len(house_list)} (累計 {len(all_listings)})"
+                )
 
             logger.info("Page %d: got %d items, total so far: %d (API total: %d)",
                         page_num + 1, len(house_list), len(all_listings), total)
@@ -272,8 +294,16 @@ def build_search_url(config: Config, district_code: int) -> str:
         f"section={district_code}",
         f"price={config.search.price_min}_{config.search.price_max}",
     ]
-    if config.search.min_ping:
-        params.append(f"area={int(config.search.min_ping)}_")
+    area_min = config.search.min_ping
+    area_max = config.search.max_ping
+    if area_min or area_max:
+        min_part = str(int(area_min)) if area_min else ""
+        max_part = str(int(area_max)) if area_max else ""
+        params.append(f"area={min_part}_{max_part}")
+    if config.search.room_counts:
+        params.append("room=" + ",".join(str(r) for r in config.search.room_counts))
+    if config.search.bathroom_counts:
+        params.append("bath=" + ",".join(str(b) for b in config.search.bathroom_counts))
     params.append("kind=0")
     return f"{RENT_BASE_URL}/list?{'&'.join(params)}"
 
@@ -297,7 +327,7 @@ def _extract_listing_ids_from_page(page) -> list[str]:
     return list(ids)
 
 
-def collect_listing_ids(config: Config) -> list[str]:
+def collect_listing_ids(config: Config, progress_cb=None) -> list[str]:
     """Use Playwright to collect listing IDs from 591 rent search pages."""
     from playwright.sync_api import sync_playwright
 
@@ -352,6 +382,8 @@ def collect_listing_ids(config: Config) -> list[str]:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 time.sleep(1.5)
 
+            if progress_cb:
+                progress_cb(f"租房 區域 {district_code}: 累計 ID {len(all_ids)}")
             logger.info("Collected %d IDs from district code %d", len(all_ids), district_code)
             time.sleep(random.uniform(config.scraper.delay_min, config.scraper.delay_max))
 
@@ -460,9 +492,9 @@ def _parse_listing_html(html: str, listing_id: str) -> dict:
     }
 
 
-def scrape_rent_listings(config: Config) -> list[dict]:
+def scrape_rent_listings(config: Config, progress_cb=None) -> list[dict]:
     """Full rent scrape pipeline: collect IDs → fetch details."""
-    listing_ids = collect_listing_ids(config)
+    listing_ids = collect_listing_ids(config, progress_cb=progress_cb)
     if not listing_ids:
         logger.info("No listing IDs found")
         return []
@@ -475,6 +507,8 @@ def scrape_rent_listings(config: Config) -> list[dict]:
         detail = fetch_listing_detail(config, lid, session)
         if detail:
             results.append(detail)
+        if progress_cb and (i + 1) % 5 == 0:
+            progress_cb(f"租房 詳情 {i + 1}/{len(listing_ids)}")
         time.sleep(random.uniform(config.scraper.delay_min, config.scraper.delay_max))
 
     logger.info("Scraped %d listings out of %d IDs", len(results), len(listing_ids))
@@ -485,7 +519,7 @@ def scrape_rent_listings(config: Config) -> list[dict]:
 # Unified entry point
 # =============================================================================
 
-def scrape_listings(config: Config) -> list[dict]:
+def scrape_listings(config: Config, progress_cb=None) -> list[dict]:
     """Scrape listings based on config mode (rent or buy).
 
     Loops through all configured regions and combines results.
@@ -503,6 +537,11 @@ def scrape_listings(config: Config) -> list[dict]:
                 price_max=config.search.price_max,
                 mode=config.search.mode,
                 min_ping=config.search.min_ping,
+                max_ping=config.search.max_ping,
+                room_counts=config.search.room_counts,
+                bathroom_counts=config.search.bathroom_counts,
+                year_built_min=config.search.year_built_min,
+                year_built_max=config.search.year_built_max,
                 keywords_include=config.search.keywords_include,
                 keywords_exclude=config.search.keywords_exclude,
                 max_pages=config.search.max_pages,
@@ -513,9 +552,9 @@ def scrape_listings(config: Config) -> list[dict]:
         )
 
         if mode == 'buy':
-            listings = scrape_buy_listings(temp_config)
+            listings = scrape_buy_listings(temp_config, progress_cb=progress_cb)
         else:
-            listings = scrape_rent_listings(temp_config)
+            listings = scrape_rent_listings(temp_config, progress_cb=progress_cb)
 
         all_listings.extend(listings)
 

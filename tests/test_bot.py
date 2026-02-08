@@ -2,7 +2,14 @@
 
 import pytest
 
-from tw_homedog.bot import _parse_price_range, _build_district_keyboard, _build_keyword_keyboard
+from tw_homedog.bot import (
+    _parse_price_range,
+    _build_district_keyboard,
+    _build_keyword_keyboard,
+    _build_list_keyboard,
+    _get_unread_matched,
+    LIST_PAGE_SIZE,
+)
 from tw_homedog.db_config import DbConfig
 from tw_homedog.regions import BUY_SECTION_CODES, RENT_SECTION_CODES
 from tw_homedog.storage import Storage
@@ -197,3 +204,131 @@ def test_build_keyword_keyboard_no_duplicate_add():
     current = ["車位", "電梯"]
     new_kws = [kw for kw in ["車位", "陽台"] if kw not in current]
     assert new_kws == ["陽台"]
+
+
+# --- _build_list_keyboard ---
+
+def _make_bot_listing(**overrides):
+    base = {
+        "source": "591",
+        "listing_id": "12345678",
+        "title": "大安區電梯套房",
+        "price": 2680,
+        "district": "大安區",
+        "size_ping": 28.0,
+        "url": "https://sale.591.com.tw/home/house/detail/2/12345678.html",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_build_list_keyboard_single_page():
+    listings = [_make_bot_listing(listing_id=str(i)) for i in range(3)]
+    kb = _build_list_keyboard(listings, offset=0, total=3, mode="buy")
+    rows = kb.inline_keyboard
+    # 3 listing buttons + 1 nav row + 1 action row
+    assert len(rows) == 5
+    # First 3 are listing buttons
+    assert rows[0][0].callback_data == "list:d:0"
+    assert "大安區" in rows[0][0].text
+    # Nav row shows 1/1
+    assert "1/1" in rows[3][0].text
+    # Action row
+    action_data = [b.callback_data for b in rows[4]]
+    assert "list:filter" in action_data
+    assert "list:ra" in action_data
+
+
+def test_build_list_keyboard_multi_page_first():
+    listings = [_make_bot_listing(listing_id=str(i)) for i in range(5)]
+    kb = _build_list_keyboard(listings, offset=0, total=12, mode="buy")
+    nav_row = kb.inline_keyboard[5]  # after 5 listings
+    nav_data = [b.callback_data for b in nav_row]
+    assert "list:p:5" in nav_data  # next page
+    assert "list:noop" in nav_data  # page indicator
+
+
+def test_build_list_keyboard_multi_page_middle():
+    listings = [_make_bot_listing(listing_id=str(i)) for i in range(5)]
+    kb = _build_list_keyboard(listings, offset=5, total=15, mode="buy")
+    nav_row = kb.inline_keyboard[5]
+    nav_data = [b.callback_data for b in nav_row]
+    assert "list:p:0" in nav_data  # prev page
+    assert "list:p:10" in nav_data  # next page
+
+
+def test_build_list_keyboard_rent_mode():
+    listings = [_make_bot_listing(price=35000)]
+    kb = _build_list_keyboard(listings, offset=0, total=1, mode="rent")
+    assert "35,000元" in kb.inline_keyboard[0][0].text
+
+
+# --- _get_unread_matched ---
+
+def test_get_unread_matched_returns_matching(storage, db_config):
+    db_config.set_many({
+        "search.regions": [1],
+        "search.mode": "buy",
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 5000,
+        "telegram.bot_token": "test:TOKEN",
+        "telegram.chat_id": "123",
+    })
+    storage.insert_listing({
+        "source": "591", "listing_id": "111", "title": "test",
+        "price": 2680, "district": "大安區", "size_ping": 28.0,
+        "raw_hash": "abc",
+    })
+    result = _get_unread_matched(storage, db_config)
+    assert len(result) == 1
+
+
+def test_get_unread_matched_excludes_read(storage, db_config):
+    db_config.set_many({
+        "search.regions": [1],
+        "search.mode": "buy",
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 5000,
+        "telegram.bot_token": "test:TOKEN",
+        "telegram.chat_id": "123",
+    })
+    storage.insert_listing({
+        "source": "591", "listing_id": "111", "title": "test",
+        "price": 2680, "district": "大安區", "size_ping": 28.0,
+        "raw_hash": "abc",
+    })
+    storage.mark_as_read("591", "111")
+    result = _get_unread_matched(storage, db_config)
+    assert len(result) == 0
+
+
+def test_get_unread_matched_with_district_filter(storage, db_config):
+    db_config.set_many({
+        "search.regions": [1],
+        "search.mode": "buy",
+        "search.districts": ["大安區", "信義區"],
+        "search.price_min": 1000,
+        "search.price_max": 5000,
+        "telegram.bot_token": "test:TOKEN",
+        "telegram.chat_id": "123",
+    })
+    storage.insert_listing({
+        "source": "591", "listing_id": "111", "title": "test1",
+        "price": 2680, "district": "大安區", "size_ping": 28.0,
+        "raw_hash": "abc",
+    })
+    storage.insert_listing({
+        "source": "591", "listing_id": "222", "title": "test2",
+        "price": 3000, "district": "信義區", "size_ping": 30.0,
+        "raw_hash": "def",
+    })
+    result = _get_unread_matched(storage, db_config, district_filter="大安區")
+    assert len(result) == 1
+    assert result[0]["listing_id"] == "111"
+
+
+def test_get_unread_matched_no_config(storage, db_config):
+    result = _get_unread_matched(storage, db_config)
+    assert result == []

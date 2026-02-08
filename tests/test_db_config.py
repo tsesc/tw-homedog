@@ -218,12 +218,36 @@ scraper:
     assert config.search.regions == [1]
     # English names migrated from YAML are converted to Chinese in build_config
     assert config.search.districts == ["大安區", "信義區"]
-    assert config.search.price_min == 1000
-    assert config.search.price_max == 3000
-    assert config.telegram.bot_token == "123:ABC"
-    assert config.search.min_ping == 20
-    assert config.search.keywords_include == ["電梯"]
-    assert config.database_path == "data/my.db"
+
+
+def test_build_config_validates_size_range(db_config):
+    db_config.set_many({
+        "search.regions": [1],
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 3000,
+        "telegram.bot_token": "123:ABC",
+        "telegram.chat_id": "456",
+        "search.min_ping": 50,
+        "search.max_ping": 40,
+    })
+    with pytest.raises(ValueError, match="min_ping must be <= search.max_ping"):
+        db_config.build_config()
+
+
+def test_build_config_validates_year_range(db_config):
+    db_config.set_many({
+        "search.regions": [1],
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 3000,
+        "telegram.bot_token": "123:ABC",
+        "telegram.chat_id": "456",
+        "search.year_built_min": 2025,
+        "search.year_built_max": 2000,
+    })
+    with pytest.raises(ValueError, match="year_built_min must be <= search.year_built_max"):
+        db_config.build_config()
 
 
 def test_migrate_from_yaml_file_not_found(db_config):

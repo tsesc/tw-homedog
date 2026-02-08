@@ -38,12 +38,12 @@ docker compose logs -f                 # View logs
    - 支援多地區同時搜尋：對每個 region 分別建立 session 並爬取
 2. **正規化 (normalizer.py)** — 將原始資料轉換為統一格式，產生 SHA256 content hash 用於去重
 3. **儲存 (storage.py)** — 寫入 SQLite，以 `(source, listing_id)` 和 `raw_hash` 雙重去重
-4. **篩選 (matcher.py)** — 從 DB 取出所有「未通知」物件，依條件過濾：
+4. **篩選 (matcher.py)** — 從 DB 取出所有「未讀」物件，依條件過濾：
    - 價格範圍（買房單位：萬，租房單位：元）
    - 區域（district 名稱比對）
    - 最小坪數
    - 關鍵字包含/排除（搜尋 title、kind_name、room、address、tags、parking_desc、shape_name、community_name）
-5. **通知 (notifier.py)** — 將符合條件的物件透過 Telegram 發送，每批最多 10 筆，間隔 1 秒
+5. **通知** — Pipeline 完成後發送摘要訊息（「有 N 筆未讀物件符合條件，使用 /list 查看」），使用者透過 `/list` 互動式瀏覽、篩選、查看詳情並標記已讀
 
 ### 買房模式的 Enrichment
 
@@ -51,10 +51,11 @@ docker compose logs -f                 # View logs
 
 ## DB 結構 (SQLite)
 
-三張表：
+四張表：
 
 - **listings** — 所有爬取到的物件（不論是否符合條件都存）。以 `(source, listing_id)` 唯一識別，`raw_hash` 用於內容去重。包含基本欄位（title, price, district, size_ping, floor, url）和 enrichment 欄位。
-- **notifications_sent** — 已發送通知的紀錄。以 `(source, listing_id, channel)` 唯一識別。matcher 用 LEFT JOIN 此表找出未通知物件。
+- **notifications_sent** — 已發送通知的紀錄。以 `(source, listing_id, channel)` 唯一識別。（歷史遺留，新版改用 listings_read）
+- **listings_read** — 使用者已讀物件追蹤。以 `(source, listing_id)` 唯一識別，記錄讀取時的 `raw_hash`。當物件 raw_hash 變更（內容更新）時自動重新視為未讀。
 - **bot_config** — Bot 模式的設定存儲（key-value JSON）。所有設定透過 Telegram inline keyboard 管理。
 
 ## Architecture
@@ -75,9 +76,10 @@ docker compose logs -f                 # View logs
 ## Bot Commands
 
 - `/start` — 首次設定引導或歡迎訊息
+- `/list` — 互動式瀏覽未讀物件（分頁、區域篩選、詳情展開、標記已讀）
 - `/settings` — 透過 inline keyboard 修改任何參數（模式、地區、區域、價格、坪數、關鍵字、頁數、排程）
-- `/status` — 當前設定摘要、排程狀態、DB 統計
-- `/run` — 手動觸發 pipeline
+- `/status` — 當前設定摘要、排程狀態、DB 統計（含未讀數）
+- `/run` — 手動觸發 pipeline（完成後顯示未讀物件摘要，引導使用 /list 查看）
 - `/pause` / `/resume` — 控制自動排程
 - `/loglevel DEBUG|INFO|WARNING|ERROR` — 動態調整 log level
 

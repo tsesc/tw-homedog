@@ -56,4 +56,5 @@ def normalize_591_listing(raw: dict) -> dict:
         "kind_name": raw.get("kind_name"),
         "room": raw.get("room"),
         "tags": raw.get("tags") or [],
+        "community_name": raw.get("community_name"),
     }

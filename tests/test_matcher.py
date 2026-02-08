@@ -3,7 +3,16 @@
 import pytest
 
 from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
-from tw_homedog.matcher import match_price, match_district, match_size, match_keywords, find_matching_listings
+from tw_homedog.matcher import (
+    match_price,
+    match_district,
+    match_size,
+    match_keywords,
+    match_room,
+    match_bathroom,
+    match_build_year,
+    find_matching_listings,
+)
 from tw_homedog.storage import Storage
 
 
@@ -16,6 +25,7 @@ def config():
             price_min=20000,
             price_max=40000,
             min_ping=20,
+            max_ping=None,
             keywords_include=["電梯"],
             keywords_exclude=["頂樓"],
         ),
@@ -80,6 +90,34 @@ def test_size_none_passes(config):
 def test_size_no_min_config(config):
     config.search.min_ping = None
     assert match_size(_listing(size_ping=5.0), config) is True
+
+
+def test_size_max(config):
+    config.search.max_ping = 30
+    assert match_size(_listing(size_ping=28.0), config) is True
+    assert match_size(_listing(size_ping=35.0), config) is False
+
+
+# Room / bathroom filters
+def test_room_filter(config):
+    config.search.room_counts = [3]
+    assert match_room(_listing(room="3房2廳2衛"), config) is True
+    assert match_room(_listing(room="2房1廳1衛"), config) is False
+    assert match_room(_listing(room=None), config) is True  # unknown allowed
+
+
+def test_bath_filter(config):
+    config.search.bathroom_counts = [2]
+    assert match_bathroom(_listing(room="3房2廳2衛"), config) is True
+    assert match_bathroom(_listing(room="3房2廳1衛"), config) is False
+
+
+# Build year filter
+def test_build_year_from_explicit(config):
+    config.search.year_built_min = 2000
+    config.search.year_built_max = 2015
+    assert match_build_year(_listing(build_year=2010), config) is True
+    assert match_build_year(_listing(build_year=1995), config) is False
 
 
 # Keyword filter tests

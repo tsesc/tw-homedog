@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
+from tw_homedog.map_preview import MapConfig
 from tw_homedog.notifier import format_listing_message, send_notifications, validate_bot_token
 from tw_homedog.storage import Storage
 
@@ -25,13 +26,15 @@ def _listing(**overrides):
 
 
 def test_format_listing_message_rent():
-    msg = format_listing_message(_listing(), mode="rent")
+    msg = format_listing_message(_listing(address="台北市大安區復興南路", community_name="XX社區"), mode="rent")
     assert "新房源符合條件" in msg
     assert "大安區電梯套房" in msg
     assert "大安區" in msg
     assert "NT$35,000/月" in msg
     assert "28.0 坪" in msg
     assert "https://rent.591.com.tw/12345678" in msg
+    assert "復興南路" in msg
+    assert "社區 XX社區" in msg
 
 
 def test_format_listing_message_buy():
@@ -76,6 +79,13 @@ def test_format_listing_missing_fields():
     assert "未知" in msg
 
 
+def test_format_listing_includes_address_and_floor():
+    listing = _listing(address="台北市大安區復興南路", floor="5F/12F")
+    msg = format_listing_message(listing, mode="buy")
+    assert "復興南路" in msg
+    assert "樓層 5F/12F" in msg
+
+
 @pytest.fixture
 def config():
     return Config(
@@ -83,6 +93,7 @@ def config():
         telegram=TelegramConfig(bot_token="test:TOKEN", chat_id="123456"),
         database_path="data/test.db",
         scraper=ScraperConfig(),
+        maps=MapConfig(enabled=False, api_key=None),
     )
 
 

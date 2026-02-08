@@ -113,3 +113,99 @@ def test_get_unenriched_listing_ids(db):
 
 def test_get_unenriched_listing_ids_empty(db):
     assert db.get_unenriched_listing_ids([]) == []
+
+
+# --- listings_read tests ---
+
+def test_init_creates_listings_read_table(db):
+    tables = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    names = {row["name"] for row in tables}
+    assert "listings_read" in names
+
+
+def test_mark_as_read(db):
+    db.insert_listing(_make_listing())
+    db.mark_as_read("591", "12345678")
+    row = db.conn.execute(
+        "SELECT * FROM listings_read WHERE source = '591' AND listing_id = '12345678'"
+    ).fetchone()
+    assert row is not None
+    assert row["raw_hash"] == "abc123"
+
+
+def test_mark_as_read_updates_on_reread(db):
+    db.insert_listing(_make_listing())
+    db.mark_as_read("591", "12345678")
+    # Simulate content update
+    db.conn.execute(
+        "UPDATE listings SET raw_hash = 'new_hash' WHERE listing_id = '12345678'"
+    )
+    db.conn.commit()
+    db.mark_as_read("591", "12345678")
+    row = db.conn.execute(
+        "SELECT raw_hash FROM listings_read WHERE source = '591' AND listing_id = '12345678'"
+    ).fetchone()
+    assert row["raw_hash"] == "new_hash"
+
+
+def test_get_unread_listings_all_unread(db):
+    db.insert_listing(_make_listing(listing_id="111"))
+    db.insert_listing(_make_listing(listing_id="222", raw_hash="def456"))
+    unread = db.get_unread_listings()
+    assert len(unread) == 2
+
+
+def test_get_unread_listings_excludes_read(db):
+    db.insert_listing(_make_listing(listing_id="111"))
+    db.insert_listing(_make_listing(listing_id="222", raw_hash="def456"))
+    db.mark_as_read("591", "111")
+    unread = db.get_unread_listings()
+    assert len(unread) == 1
+    assert unread[0]["listing_id"] == "222"
+
+
+def test_get_unread_listings_content_change_resurfaces(db):
+    db.insert_listing(_make_listing())
+    db.mark_as_read("591", "12345678")
+    # Simulate content update — raw_hash changes
+    db.conn.execute(
+        "UPDATE listings SET raw_hash = 'updated_hash' WHERE listing_id = '12345678'"
+    )
+    db.conn.commit()
+    unread = db.get_unread_listings()
+    assert len(unread) == 1
+    assert unread[0]["listing_id"] == "12345678"
+
+
+def test_get_unread_count(db):
+    db.insert_listing(_make_listing(listing_id="111"))
+    db.insert_listing(_make_listing(listing_id="222", raw_hash="def456"))
+    db.mark_as_read("591", "111")
+    assert db.get_unread_count() == 1
+
+
+def test_mark_many_as_read(db):
+    db.insert_listing(_make_listing(listing_id="111"))
+    db.insert_listing(_make_listing(listing_id="222", raw_hash="def456"))
+    db.insert_listing(_make_listing(listing_id="333", raw_hash="ghi789"))
+    db.mark_many_as_read("591", ["111", "222"])
+    unread = db.get_unread_listings()
+    assert len(unread) == 1
+    assert unread[0]["listing_id"] == "333"
+
+
+def test_mark_many_as_read_empty(db):
+    db.mark_many_as_read("591", [])  # Should not raise
+
+
+def test_get_listing_by_id(db):
+    db.insert_listing(_make_listing())
+    listing = db.get_listing_by_id("591", "12345678")
+    assert listing is not None
+    assert listing["title"] == "大安區電梯套房"
+
+
+def test_get_listing_by_id_not_found(db):
+    assert db.get_listing_by_id("591", "nonexistent") is None

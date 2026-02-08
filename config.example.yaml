@@ -32,9 +32,15 @@ search:
     min: 2000
     max: 3000
 
-  # 坪數下限
+  # 格局與坪數/屋齡範圍
+  room_counts: []        # 可接受的房數 (例如 [2,3]，留空表示不限)
+  bathroom_counts: []    # 可接受的衛浴數 (例如 [1,2]，留空表示不限)
   size:
-    min_ping: 20
+    min_ping: 20         # 坪數下限；0 或省略表示不限
+    max_ping: null       # 坪數上限；null 表示不限
+  year_built:
+    min: null            # 建造年份下限（YYYY），null 表示不限
+    max: null            # 建造年份上限（YYYY），null 表示不限
 
   # 關鍵字篩選
   keywords:
@@ -48,6 +54,21 @@ search:
 telegram:
   bot_token: "YOUR_BOT_TOKEN_HERE"  # 從 @BotFather 取得
   chat_id: "YOUR_CHAT_ID_HERE"      # 你的 chat ID 或 group ID
+
+# Google Maps 縮圖 (可選功能)
+maps:
+  enabled: false               # 打開後會在通知中附上地圖縮圖
+  api_key: "YOUR_MAPS_API_KEY"  # Google Maps API key
+  base_url: "https://maps.googleapis.com/maps/api/staticmap"
+  size: "640x400"               # 寬x高，pixel
+  zoom: null                    # 預設自動；可填 14~18
+  scale: 2                      # 1 或 2 (retina)
+  language: "zh-TW"
+  region: "tw"
+  timeout: 6                    # 請求逾時秒數
+  cache_ttl_seconds: 86400      # 縮圖與 geocode 緩存時間（秒）
+  cache_dir: "data/map_cache"   # 緩存檔案存放路徑
+  style: null                   # 可填自訂 style 參數
 
 # 資料庫設定
 database:

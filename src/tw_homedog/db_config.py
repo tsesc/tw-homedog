@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from tw_homedog.config import Config, ScraperConfig, SearchConfig, TelegramConfig
+from tw_homedog.map_preview import MapConfig
 from tw_homedog.regions import EN_TO_ZH
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,11 @@ REQUIRED_KEYS = [
 DEFAULTS = {
     "search.mode": "buy",
     "search.min_ping": None,
+    "search.max_ping": None,
+    "search.room_counts": [],
+    "search.bathroom_counts": [],
+    "search.year_built_min": None,
+    "search.year_built_max": None,
     "search.keywords_include": [],
     "search.keywords_exclude": [],
     "search.max_pages": 3,
@@ -33,6 +39,17 @@ DEFAULTS = {
     "scraper.timeout": 30,
     "scraper.max_retries": 3,
     "scheduler.interval_minutes": 120,
+    "maps.enabled": False,
+    "maps.base_url": "https://maps.googleapis.com/maps/api/staticmap",
+    "maps.size": "640x400",
+    "maps.zoom": None,
+    "maps.scale": 2,
+    "maps.language": "zh-TW",
+    "maps.region": "tw",
+    "maps.timeout": 6,
+    "maps.cache_ttl_seconds": 86400,
+    "maps.cache_dir": "data/map_cache",
+    "maps.style": None,
 }
 
 
@@ -137,6 +154,43 @@ class DbConfig:
         raw_districts = _get("search.districts", [])
         districts = [EN_TO_ZH.get(d, d) for d in raw_districts]
 
+        def _validate_filters():
+            errors: list[str] = []
+
+            def _check_counts(name: str, counts):
+                if counts is None:
+                    return
+                if not isinstance(counts, list):
+                    errors.append(f"{name} must be a list")
+                    return
+                for c in counts:
+                    if not isinstance(c, int):
+                        errors.append(f"{name} values must be integers")
+                        break
+                    if c < 1 or c > 5:
+                        errors.append(f"{name} values must be between 1 and 5")
+                        break
+
+            room_counts = _get("search.room_counts", [])
+            bath_counts = _get("search.bathroom_counts", [])
+            size_min = _get("search.min_ping")
+            size_max = _get("search.max_ping")
+            year_min = _get("search.year_built_min")
+            year_max = _get("search.year_built_max")
+
+            _check_counts("search.room_counts", room_counts)
+            _check_counts("search.bathroom_counts", bath_counts)
+
+            if size_min is not None and size_max is not None and size_min > size_max:
+                errors.append("search.min_ping must be <= search.max_ping")
+            if year_min is not None and year_max is not None and year_min > year_max:
+                errors.append("search.year_built_min must be <= search.year_built_max")
+
+            if errors:
+                raise ValueError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors))
+
+        _validate_filters()
+
         return Config(
             search=SearchConfig(
                 regions=regions,
@@ -145,6 +199,11 @@ class DbConfig:
                 price_max=_get("search.price_max"),
                 mode=_get("search.mode", "buy"),
                 min_ping=_get("search.min_ping"),
+                max_ping=_get("search.max_ping"),
+                room_counts=_get("search.room_counts", []),
+                bathroom_counts=_get("search.bathroom_counts", []),
+                year_built_min=_get("search.year_built_min"),
+                year_built_max=_get("search.year_built_max"),
                 keywords_include=_get("search.keywords_include", []),
                 keywords_exclude=_get("search.keywords_exclude", []),
                 max_pages=_get("search.max_pages", 3),
@@ -159,6 +218,20 @@ class DbConfig:
                 delay_max=_get("scraper.delay_max", 5),
                 timeout=_get("scraper.timeout", 30),
                 max_retries=_get("scraper.max_retries", 3),
+            ),
+            maps=MapConfig(
+                enabled=_get("maps.enabled", False),
+                api_key=_get("maps.api_key"),
+                base_url=_get("maps.base_url", DEFAULTS["maps.base_url"]),
+                size=_get("maps.size", DEFAULTS["maps.size"]),
+                zoom=_get("maps.zoom", DEFAULTS["maps.zoom"]),
+                scale=_get("maps.scale", DEFAULTS["maps.scale"]),
+                language=_get("maps.language", DEFAULTS["maps.language"]),
+                region=_get("maps.region", DEFAULTS["maps.region"]),
+                timeout=_get("maps.timeout", DEFAULTS["maps.timeout"]),
+                cache_ttl_seconds=_get("maps.cache_ttl_seconds", DEFAULTS["maps.cache_ttl_seconds"]),
+                cache_dir=_get("maps.cache_dir", DEFAULTS["maps.cache_dir"]),
+                style=_get("maps.style", DEFAULTS["maps.style"]),
             ),
         )
 
@@ -186,6 +259,10 @@ class DbConfig:
             items["search.region"] = search["region"]
         if "districts" in search:
             items["search.districts"] = search["districts"]
+        if "room_counts" in search:
+            items["search.room_counts"] = search["room_counts"]
+        if "bathroom_counts" in search:
+            items["search.bathroom_counts"] = search["bathroom_counts"]
         if "min" in price:
             items["search.price_min"] = price["min"]
         if "max" in price:
@@ -194,6 +271,14 @@ class DbConfig:
             items["search.mode"] = search["mode"]
         if "min_ping" in size:
             items["search.min_ping"] = size["min_ping"]
+        if "max_ping" in size:
+            items["search.max_ping"] = size["max_ping"]
+        if "year_built" in search:
+            year_built = search.get("year_built", {})
+            if "min" in year_built:
+                items["search.year_built_min"] = year_built["min"]
+            if "max" in year_built:
+                items["search.year_built_max"] = year_built["max"]
         if "include" in keywords:
             items["search.keywords_include"] = keywords["include"]
         if "exclude" in keywords:
