@@ -14,8 +14,10 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
-# Install Playwright browsers
-RUN .venv/bin/playwright install --with-deps chromium
+# Install Playwright browsers (cached but also persisted for next stage)
+RUN --mount=type=cache,target=/root/.cache/ms-playwright \
+    .venv/bin/playwright install --with-deps chromium && \
+    cp -r /root/.cache/ms-playwright /root/.ms-playwright
 
 # Production stage
 FROM python:3.12-slim-bookworm
@@ -30,7 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /root/.cache/ms-playwright /root/.cache/ms-playwright
+COPY --from=builder /root/.ms-playwright /root/.cache/ms-playwright
+COPY --from=builder /app/src /app/src
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Create data and logs directories
