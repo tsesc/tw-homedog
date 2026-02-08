@@ -1,5 +1,9 @@
 """Tests for Telegram Bot handlers and helpers."""
 
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from tw_homedog.bot import (
@@ -9,6 +13,7 @@ from tw_homedog.bot import (
     _build_list_keyboard,
     _get_unread_matched,
     LIST_PAGE_SIZE,
+    cmd_dedupall,
 )
 from tw_homedog.db_config import DbConfig
 from tw_homedog.regions import BUY_SECTION_CODES, RENT_SECTION_CODES
@@ -343,3 +348,81 @@ def test_get_unread_matched_with_district_filter(storage, db_config):
 def test_get_unread_matched_no_config(storage, db_config):
     result = _get_unread_matched(storage, db_config)
     assert result == []
+
+
+def test_cmd_dedupall_invalid_batch_size(monkeypatch):
+    monkeypatch.setattr("tw_homedog.bot._pipeline_running", False)
+
+    class DummyDbConfig:
+        def get(self, _key, default=None):
+            return default
+
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    context = SimpleNamespace(
+        args=["abc"],
+        bot_data={"storage": object(), "db_config": DummyDbConfig()},
+        job_queue=SimpleNamespace(get_jobs_by_name=lambda _: []),
+    )
+
+    asyncio.run(cmd_dedupall(update, context))
+    text = update.message.reply_text.call_args[0][0]
+    assert "用法：/dedupall" in text
+
+
+def test_cmd_dedupall_runs_until_empty(monkeypatch):
+    monkeypatch.setattr("tw_homedog.bot._pipeline_running", False)
+
+    class DummyDbConfig:
+        def get(self, key, default=None):
+            if key == "scheduler.paused":
+                return False
+            if key == "dedup.cleanup_batch_size":
+                return 100
+            return default
+
+        def build_config(self):
+            return SimpleNamespace(
+                dedup=SimpleNamespace(
+                    threshold=0.82,
+                    price_tolerance=0.05,
+                    size_tolerance=0.08,
+                )
+            )
+
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    context = SimpleNamespace(
+        args=[],
+        bot_data={"storage": object(), "db_config": DummyDbConfig()},
+        job_queue=SimpleNamespace(get_jobs_by_name=lambda _: []),
+    )
+
+    # call order:
+    # 1) initial dry-run
+    # 2) apply round
+    # 3) remaining dry-run (0 groups -> break)
+    # 4) final summary dry-run
+    responses = [
+        {"groups": 2, "projected_merge_records": 3},
+        {
+            "groups": 2,
+            "projected_merge_records": 3,
+            "merged_records": 3,
+            "cleanup_failed": 0,
+            "validation": {"notifications_sent": 0, "listings_read": 0, "favorites": 0},
+        },
+        {"groups": 0, "projected_merge_records": 0},
+        {"groups": 0, "projected_merge_records": 0},
+    ]
+
+    def _fake_run_cleanup(*_args, **_kwargs):
+        return responses.pop(0)
+
+    with patch("tw_homedog.bot.run_cleanup", side_effect=_fake_run_cleanup), patch(
+        "tw_homedog.bot._ensure_scheduler"
+    ) as mock_ensure:
+        asyncio.run(cmd_dedupall(update, context))
+
+    assert update.message.reply_text.call_count >= 3
+    final_text = update.message.reply_text.call_args_list[-1][0][0]
+    assert "去重完成" in final_text
+    mock_ensure.assert_called_once()

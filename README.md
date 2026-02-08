@@ -40,6 +40,7 @@ TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy uv run python -m tw_homedog
 | `/settings` | 修改搜尋條件（模式、區域、價格、坪數、關鍵字、排程） |
 | `/status` | 查看當前設定、排程狀態、物件統計 |
 | `/run` | 手動觸發爬取 + 通知 |
+| `/dedupall [batch_size]` | 以 batch 方式執行全庫去重，直到無剩餘群組 |
 | `/pause` | 暫停自動排程 |
 | `/resume` | 恢復自動排程 |
 | `/loglevel` | 調整日誌等級（DEBUG/INFO/WARNING/ERROR） |
