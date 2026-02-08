@@ -59,7 +59,7 @@ def test_resolve_districts_buy_unknown_skipped():
 
 def test_resolve_districts_buy_newtaipei():
     result = resolve_districts(3, ["板橋區", "中和區"], mode="buy")
-    assert result == {"板橋區": 26, "中和區": 28}
+    assert result == {"板橋區": 26, "中和區": 38}
 
 
 def test_resolve_districts_buy_taoyuan():

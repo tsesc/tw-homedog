@@ -24,45 +24,72 @@ docker compose up -d                   # Start Bot mode with Docker
 docker compose logs -f                 # View logs
 ```
 
+## 專案概述
+
+台灣 591 房屋網的智慧通知系統。自動爬取買房/租房物件，依使用者設定的條件篩選後，透過 Telegram Bot 推送通知。
+
+## 運作流程
+
+### Pipeline: `scraper → normalizer → storage → matcher → notifier`
+
+1. **爬取 (scraper.py)** — 從 591 網站抓取房屋物件原始資料
+   - 買房模式：Playwright 取得 session → requests 呼叫 BFF API (`bff-house.591.com.tw`)
+   - 租房模式：Playwright 收集物件 ID → requests 抓取詳情 HTML（僅台北市驗證過）
+   - 支援多地區同時搜尋：對每個 region 分別建立 session 並爬取
+2. **正規化 (normalizer.py)** — 將原始資料轉換為統一格式，產生 SHA256 content hash 用於去重
+3. **儲存 (storage.py)** — 寫入 SQLite，以 `(source, listing_id)` 和 `raw_hash` 雙重去重
+4. **篩選 (matcher.py)** — 從 DB 取出所有「未通知」物件，依條件過濾：
+   - 價格範圍（買房單位：萬，租房單位：元）
+   - 區域（district 名稱比對）
+   - 最小坪數
+   - 關鍵字包含/排除（搜尋 title、kind_name、room、address、tags、parking_desc、shape_name、community_name）
+5. **通知 (notifier.py)** — 將符合條件的物件透過 Telegram 發送，每批最多 10 筆，間隔 1 秒
+
+### 買房模式的 Enrichment
+
+符合篩選條件的買房物件會額外呼叫 detail API 取得：parking_desc、public_ratio、manage_price_desc、fitment、shape_name、community_name、main_area、direction。Enrichment 結果存回 DB 的 `is_enriched` 欄位，避免重複呼叫。Enrich 後會重新執行 matcher（因為新欄位可能影響關鍵字篩選結果）。
+
+## DB 結構 (SQLite)
+
+三張表：
+
+- **listings** — 所有爬取到的物件（不論是否符合條件都存）。以 `(source, listing_id)` 唯一識別，`raw_hash` 用於內容去重。包含基本欄位（title, price, district, size_ping, floor, url）和 enrichment 欄位。
+- **notifications_sent** — 已發送通知的紀錄。以 `(source, listing_id, channel)` 唯一識別。matcher 用 LEFT JOIN 此表找出未通知物件。
+- **bot_config** — Bot 模式的設定存儲（key-value JSON）。所有設定透過 Telegram inline keyboard 管理。
+
 ## Architecture
 
-Two modes of operation:
-- **Bot mode** (default): Long-running Telegram Bot with inline keyboard config, built-in scheduler
-- **CLI mode** (`cli` subcommand): One-shot pipeline execution for YAML-based config
+兩種運作模式：
+- **Bot mode** (預設)：長駐 Telegram Bot，透過 inline keyboard 設定，JobQueue 排程自動執行
+- **CLI mode** (`cli` 子指令)：一次性執行 pipeline，使用 YAML 設定檔
 
-Pipeline: `scraper → normalizer → storage → matcher → notifier`
+### 主要模組
 
-- **bot.py** — Telegram Bot Application with ConversationHandler for setup, InlineKeyboard for settings, JobQueue for scheduling
-- **db_config.py** — SQLite-based config storage (key-value), replaces YAML in Bot mode. Supports `build_config()` to create Config dataclass from DB
-- **log.py** — Structured logging with RotatingFileHandler, configurable via `LOG_LEVEL` env var
-- **regions.py** — Comprehensive region/district code data for all 22 Taiwan counties/cities. Buy section codes for all regions; rent section codes for Taipei only. Provides `resolve_region()` and `resolve_districts()` helpers, plus `EN_TO_ZH` mapping for backward compatibility with English district names.
-- **scraper.py** — Two modes with different strategies:
-  - **Buy mode**: Playwright bootstraps session (CSRF token + cookies) → `requests` calls BFF API (`bff-house.591.com.tw/v1/web/sale/list`)
-  - **Rent mode**: Playwright collects listing IDs from search pages → `requests` fetches detail HTML. Only Taipei is verified.
-  - Buy/rent have completely different district codes (e.g., 內湖區: buy=10, rent=5)
-- **normalizer.py** — Converts raw scraped dicts to unified format with SHA256 content hash
-- **storage.py** — SQLite with WAL mode. Tables: `listings`, `notifications_sent`, `bot_config`
-- **matcher.py** — Filters unnotified listings by price/district/size/keywords
-- **notifier.py** — Telegram Bot API with asyncio. Max 10 per batch, 1s between messages
-- **config.py** — YAML loader with dotted-key validation, dataclass-based config objects (CLI mode). Resolves Chinese region names ("台北市"→1) and converts English district names to Chinese ("Neihu"→"內湖區") for backward compatibility.
+- **bot.py** — Telegram Bot Application，ConversationHandler 處理 setup flow，InlineKeyboard 處理 settings，JobQueue 排程
+- **db_config.py** — SQLite key-value 設定存儲，`build_config()` 從 DB 組建 Config dataclass。支援 `search.region`（舊格式）和 `search.regions`（新格式 list）的向後相容
+- **regions.py** — 全台 22 縣市的 region code 和 district section code。買賣/租房的 section code 完全不同（如內湖區：buy=10, rent=5）。Section codes 須與 591 BFF API 實際回傳值一致
+- **scraper.py** — 591 爬蟲。`scrape_listings()` 為統一入口，依 mode 分派到 `scrape_buy_listings()` 或 `scrape_rent_listings()`
+- **config.py** — YAML 設定載入與驗證（CLI mode）。`SearchConfig.regions: list[int]` 支援多地區
+- **templates.py** — 預設設定模板，用於 Bot 快速設定
 
 ## Bot Commands
 
-- `/start` — First-time guided setup or welcome message
-- `/settings` — Modify any parameter via inline keyboard (mode, districts, price, size, keywords, schedule)
-- `/status` — Current config summary, schedule status, DB stats
-- `/run` — Manual pipeline trigger
-- `/pause` / `/resume` — Control automatic scheduling
-- `/loglevel DEBUG|INFO|WARNING|ERROR` — Dynamic log level adjustment
+- `/start` — 首次設定引導或歡迎訊息
+- `/settings` — 透過 inline keyboard 修改任何參數（模式、地區、區域、價格、坪數、關鍵字、頁數、排程）
+- `/status` — 當前設定摘要、排程狀態、DB 統計
+- `/run` — 手動觸發 pipeline
+- `/pause` / `/resume` — 控制自動排程
+- `/loglevel DEBUG|INFO|WARNING|ERROR` — 動態調整 log level
 
 ## Key Technical Gotchas
 
-- 591 API `total` field is a **string**, must cast to `int`
-- 591 API `totalPrice` parameter is **ignored** — price filtering must be client-side in matcher
-- Playwright `document.cookie` is blocked on 591 — use `page.context.cookies()` instead
-- Buy mode price unit is 萬 (10k NTD), rent mode is NTD — config `price.min/max` must match the mode
-- `notifier.py` uses `asyncio.run()` inside sync code for Telegram async API
-- `python-telegram-bot[job-queue]` extra is required for JobQueue/APScheduler support
+- 591 BFF API `total` 欄位是 **string**，必須轉 `int`
+- 591 API `totalPrice` 參數**被忽略** — 價格過濾必須在 matcher 端做
+- Playwright `document.cookie` 在 591 被擋 — 必須用 `page.context.cookies()`
+- 買房價格單位是萬，租房是元 — config `price.min/max` 必須對應模式
+- **BUY_SECTION_CODES 必須與 591 BFF API 實際值一致**。可用 API `regionid=X&section=Y` 驗證 `section_name` 回傳值。各地區 code 不是連續或可預測的
+- `notifier.py` 在 sync code 中使用 `asyncio.run()` 呼叫 Telegram async API
+- `python-telegram-bot[job-queue]` extra 是 JobQueue/APScheduler 所需
 
 ## Environment Variables (Bot mode)
 
@@ -73,10 +100,10 @@ Pipeline: `scraper → normalizer → storage → matcher → notifier`
 
 ## Config
 
-**Bot mode**: Config stored in SQLite `bot_config` table, managed via Telegram inline keyboard.
-**CLI mode**: YAML config at `config.yaml` (copy from `config.example.yaml`). See `config.examples/` for use-case-specific samples.
+**Bot mode**: Config 存在 SQLite `bot_config` 表，透過 Telegram inline keyboard 管理。
+**CLI mode**: YAML config at `config.yaml` (copy from `config.example.yaml`)。
 
-Config supports Chinese-first format: `region: "台北市"`, `districts: ["內湖區", "南港區"]`. English names (`region: 1`, `districts: ["Neihu"]`) still work for backward compatibility. All 22 Taiwan counties/cities are supported for buy mode; rent mode only supports Taipei.
+Config 支援中文優先格式：`regions: ["台北市", "新北市"]`、`districts: ["內湖區", "南港區"]`。英文名（`region: 1`、`districts: ["Neihu"]`）仍可使用。全台 22 縣市支援買房模式；租房僅台北市。
 
 ## Testing
 
