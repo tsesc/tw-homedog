@@ -1,8 +1,21 @@
 # tw-homedog
 
-Taiwan Real Estate Smart Listing Notifier — 自動監控 591 新房源並透過 Telegram 即時通知。
+Taiwan Real Estate Smart Listing Notifier — 自動監控 591 新房源並透過 Telegram Bot 互動式瀏覽。
 
 支援**買房** (`sale.591.com.tw`) 和**租屋** (`rent.591.com.tw`) 兩種模式。
+
+## Features
+
+- **自動爬取** — 定時從 591 抓取新物件，支援多地區同時搜尋（如台北市+新北市）
+- **智慧篩選** — 依價格、區域、坪數、關鍵字（包含/排除）自動過濾
+- **互動式瀏覽** — `/list` 指令提供分頁瀏覽、區域篩選、詳情展開、一鍵標記已讀
+- **已讀追蹤** — 以內容 hash 追蹤已讀狀態，物件更新時自動重新顯示
+- **收藏功能** — 星號收藏感興趣的物件，`/favorites` 隨時查看
+- **跨仲介去重** — `entity_fingerprint` + 相似度評分，自動合併同一房屋的不同刊登
+- **物件詳情** — 買房模式自動 enrich 社區名、車位、公設比、格局等關鍵資訊
+- **地圖縮圖** — 可選 Google Maps Static API，在通知中附上位置預覽
+- **全 Telegram 操作** — 所有設定透過 inline keyboard 完成，無需編輯設定檔
+- **Docker 一鍵部署** — `docker compose up -d` 即可運行
 
 ## Quick Start (Docker)
 
@@ -37,13 +50,31 @@ TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy uv run python -m tw_homedog
 | 指令 | 說明 |
 |------|------|
 | `/start` | 首次設定引導 / 歡迎訊息 |
-| `/settings` | 修改搜尋條件（模式、區域、價格、坪數、關鍵字、排程） |
+| `/list` | 互動式瀏覽未讀物件（分頁、篩選、詳情、標記已讀） |
+| `/favorites` | 查看收藏的物件 |
+| `/settings` | 修改搜尋條件（模式、地區、區域、價格、坪數、關鍵字、排程） |
 | `/status` | 查看當前設定、排程狀態、物件統計 |
-| `/run` | 手動觸發爬取 + 通知 |
-| `/dedupall [batch_size]` | 以 batch 方式執行全庫去重，直到無剩餘群組 |
-| `/pause` | 暫停自動排程 |
-| `/resume` | 恢復自動排程 |
+| `/help` | 指令列表 |
+| `/run` | 手動觸發爬取 |
+| `/dedupall [batch_size]` | 以 batch 方式執行全庫去重 |
+| `/pause` / `/resume` | 暫停 / 恢復自動排程 |
 | `/loglevel` | 調整日誌等級（DEBUG/INFO/WARNING/ERROR） |
+| `/config_export` | 匯出目前設定為 JSON |
+| `/config_import` | 匯入設定（JSON） |
+
+## How It Works
+
+```
+排程觸發 → 爬取 591 → 正規化 → 去重存入 DB → Enrich 詳情 → 篩選 → 摘要通知
+                                                                    ↓
+                                                          /list 互動式瀏覽
+```
+
+1. **爬取** — Playwright 取得 session，requests 呼叫 591 BFF API（買房）或抓取 HTML（租房）
+2. **去重** — `entity_fingerprint`（地址+社區 hash）+ 相似度評分，跨仲介識別同一房屋
+3. **Enrich** — 買房物件額外取得社區名、車位、公設比、格局等詳情
+4. **篩選** — 依設定條件過濾，發送摘要通知引導使用 `/list` 瀏覽
+5. **互動** — 分頁列表、區域篩選、展開詳情、標記已讀、收藏
 
 ## Environment Variables
 
@@ -54,21 +85,6 @@ TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy uv run python -m tw_homedog
 | `DATABASE_PATH` | No | `data/homedog.db` | SQLite 資料庫路徑 |
 | `LOG_LEVEL` | No | `INFO` | 日誌等級 |
 
-## CLI Mode (Legacy)
-
-仍可使用傳統 YAML 配置 + 一次性執行模式：
-
-```bash
-# Copy config
-cp config.example.yaml config.yaml
-# Edit config.yaml
-
-# Run pipeline
-uv run python -m tw_homedog cli run
-uv run python -m tw_homedog cli scrape
-uv run python -m tw_homedog cli notify
-```
-
 ## Configuration
 
 ### Bot Mode
@@ -77,13 +93,28 @@ uv run python -m tw_homedog cli notify
 
 首次啟動時傳送 `/start` 開始設定引導，之後隨時可用 `/settings` 修改任何參數。
 
+### CLI Mode (Legacy)
+
+仍可使用傳統 YAML 配置 + 一次性執行模式：
+
+```bash
+cp config.example.yaml config.yaml
+# Edit config.yaml
+
+uv run python -m tw_homedog cli run        # Full pipeline
+uv run python -m tw_homedog cli scrape     # Scrape only
+uv run python -m tw_homedog cli notify     # Notify only
+```
+
+設定範例請參考 `config.examples/` 目錄。
+
 ## Listing Deduplication
 
 系統會在寫入前用 `entity_fingerprint + 相似度分數` 做去重，避免同一間房被多位房仲重複入庫。
 
 ### Dedup Tuning Knobs
 
-可在 `config.yaml` 的 `dedup` 區塊調整：
+可在 `config.yaml` 的 `dedup` 區塊或 Bot 設定中調整：
 
 ```yaml
 dedup:
@@ -96,144 +127,78 @@ dedup:
 
 - `threshold`: 越高越保守（降低誤刪，可能漏掉部分重複）。
 - `price_tolerance` / `size_tolerance`: 允許同屋在不同刊登間的價格/坪數微幅差異。
-- `cleanup_batch_size`: 每次清理最多處理群組數量，建議先小批次。
 
-### Historical Cleanup (Dry-run / Apply)
-
-先跑 dry-run 看預估合併群組，再決定是否 apply：
+### Historical Cleanup
 
 ```bash
-# 預設 dry-run（不改資料）
+# Dry-run（不改資料）
 uv run python -m tw_homedog cli dedup-cleanup
-
-# 調整門檻
-uv run python -m tw_homedog cli dedup-cleanup --threshold 0.85 --batch-size 100
 
 # 套用清理
 uv run python -m tw_homedog cli dedup-cleanup --apply
+
+# 或在 Bot 中使用 /dedupall
 ```
-
-### Operations Playbook
-
-1. 先備份 DB：`sqlite3 data/homedog.db ".backup data/homedog-backup.db"`  
-2. 執行 dry-run，檢查合併群組是否合理（抽樣看 false positive / false negative）。  
-3. 以小批次 `--batch-size` 套用；每個群組在單一 transaction 合併關聯（`notifications_sent`、`listings_read`、`favorites`）。  
-4. 套用後再跑一次 dry-run，確認剩餘重複量與關聯完整性。  
-
-Pipeline 日誌會輸出去重計數：`inserted`、`skipped_duplicate`、`merged`、`cleanup_failed`。
 
 ## Telegram 縮圖（Google Maps）
 
-個人用量通常 <10k 次/月，Google Maps Static Maps + Geocoding 都有每月 10,000 次免費額度，超出後才計費。  
+可選功能。個人用量通常 <10k 次/月，Google Maps Static Maps + Geocoding 都有每月 10,000 次免費額度。
+
 需求：Google Cloud 專案 + 啟用 Static Maps API 與 Geocoding API + API key。
 
-### 如何在 Google Cloud Console 取得並限制 API Key（從零開始）
-1. 進入 [console.cloud.google.com](https://console.cloud.google.com/)，建立新專案（例如 `homedog-maps`），若要求請綁定結算帳戶。
-2. 左側「API 和服務」→「程式庫」→ 啟用 **Maps Static API** 與 **Geocoding API**。
-3. 「API 和服務」→「認證」→「建立認證」→ **API 金鑰**，建立後點「限制金鑰」：
-   - 應用限制：選「IP 位址」，填你的伺服器/本機出口 IP（不填也可，但風險較高）。
-   - API 限制：選「限制鍵」，勾 **Maps Static API** 與 **Geocoding API**。
-4. 設每日配額防爆：在兩個 API 的「配額」頁面，將「Requests per day」改成例如 9000（低於免費 10k）。
-5. 複製產生的 API Key，供下方設定使用。
+### Bot 模式設定
 
-### Bot 模式（DB 設定）
-1. 在 Google Cloud Console 建立或選擇專案，啟用 **Static Maps API** 與 **Geocoding API**，建立 API Key，建議設定 **每日配額** 以防暴衝（例如 9,000/天）。  
-2. 將 Maps 設定寫入 SQLite `bot_config`（預設路徑 `data/homedog.db`，若環境變數 `DATABASE_PATH` 不同請替換）：  
-   ```bash
-   python - <<'PY'
-   import sqlite3, json, os
-   db = os.environ.get("DATABASE_PATH", "data/homedog.db")
-   conn = sqlite3.connect(db)
-   def set_k(k,v):
-       conn.execute(
-           "INSERT INTO bot_config (key,value,updated_at) VALUES (?,?,datetime('now')) "
-           "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-           (k, json.dumps(v, ensure_ascii=False))
-       )
-   for k,v in {
-       "maps.enabled": True,
-       "maps.api_key": "YOUR_GOOGLE_MAPS_API_KEY",
-       "maps.base_url": "https://maps.googleapis.com/maps/api/staticmap",
-       "maps.size": "640x400",
-       "maps.zoom": 16,
-       "maps.scale": 2,
-       "maps.language": "zh-TW",
-       "maps.region": "tw",
-       "maps.timeout": 6,
-       "maps.cache_ttl_seconds": 86400,
-       "maps.cache_dir": "data/map_cache",
-       "maps.style": None,
-   }.items():
-       set_k(k, v)
-   conn.commit(); conn.close()
-   print("Maps config updated in", db)
-   PY
-   ```
-3. 重啟 bot（或重新部署容器）。新的通知會嘗試產出地圖縮圖，失敗時自動降級為純文字地址。
+將 Maps 設定寫入 SQLite `bot_config`：
+
+```bash
+python - <<'PY'
+import sqlite3, json, os
+db = os.environ.get("DATABASE_PATH", "data/homedog.db")
+conn = sqlite3.connect(db)
+def set_k(k,v):
+    conn.execute(
+        "INSERT INTO bot_config (key,value,updated_at) VALUES (?,?,datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (k, json.dumps(v, ensure_ascii=False))
+    )
+for k,v in {
+    "maps.enabled": True,
+    "maps.api_key": "YOUR_GOOGLE_MAPS_API_KEY",
+    "maps.base_url": "https://maps.googleapis.com/maps/api/staticmap",
+    "maps.size": "640x400",
+    "maps.zoom": 16,
+    "maps.scale": 2,
+    "maps.language": "zh-TW",
+    "maps.region": "tw",
+    "maps.timeout": 6,
+    "maps.cache_ttl_seconds": 86400,
+    "maps.cache_dir": "data/map_cache",
+    "maps.style": None,
+}.items():
+    set_k(k, v)
+conn.commit(); conn.close()
+print("Maps config updated in", db)
+PY
+```
+
+重啟 bot 後，新通知會附上地圖縮圖，失敗時自動降級為純文字地址。
 
 ### CLI / config.yaml
-若仍使用 YAML：在 `config.yaml` 增加下列區塊即可（與 `telegram` 平行）：
+
 ```yaml
 maps:
   enabled: true
   api_key: YOUR_GOOGLE_MAPS_API_KEY
-  base_url: "https://maps.googleapis.com/maps/api/staticmap"
-  size: "640x400"
-  zoom: 16
-  scale: 2
-  language: "zh-TW"
-  region: "tw"
-  timeout: 6
-  cache_ttl_seconds: 86400
-  cache_dir: "data/map_cache"
-  style: null
 ```
 
-### CLI Mode
-
-`config.yaml` 設定說明：
-
-```yaml
-search:
-  mode: buy              # "buy" or "rent"
-  region: "台北市"        # 中文名稱或數字代碼 (1)，支援全台 22 縣市
-  districts:
-    - 南港區
-    - 內湖區
-  price:
-    min: 2000            # buy: 萬, rent: NTD/月
-    max: 3000
-  room_counts: []        # e.g. [2,3] 房數，留空表示不限
-  bathroom_counts: []    # e.g. [1,2] 衛浴數，留空表示不限
-  size:
-    min_ping: 20         # optional
-    max_ping: null       # optional
-  year_built:
-    min: null            # optional, 建造年份
-    max: null
-  keywords:
-    include: []          # all must match
-    exclude: []          # any excludes
-  max_pages: 3
-
-telegram:
-  bot_token: "YOUR_BOT_TOKEN_HERE"
-  chat_id: "YOUR_CHAT_ID_HERE"
-```
-
-更多使用情境的設定範例請參考 `config.examples/` 目錄。
+完整選項請參考 `config.example.yaml`。
 
 ## Docker
 
 ```bash
-# Build and start
-docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Stop
-docker compose down
+docker compose up -d      # Start
+docker compose logs -f     # View logs
+docker compose down        # Stop
 ```
 
 Data is persisted in Docker volumes (`homedog-data`, `homedog-logs`).

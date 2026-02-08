@@ -51,11 +51,12 @@ docker compose logs -f                 # View logs
 
 ## DB 結構 (SQLite)
 
-四張表：
+五張表：
 
-- **listings** — 所有爬取到的物件（不論是否符合條件都存）。以 `(source, listing_id)` 唯一識別，`raw_hash` 用於內容去重。包含基本欄位（title, price, district, size_ping, floor, url）和 enrichment 欄位。
+- **listings** — 所有爬取到的物件（不論是否符合條件都存）。以 `(source, listing_id)` 唯一識別，`raw_hash` 用於內容去重，`entity_fingerprint` 用於跨仲介去重。包含基本欄位（title, price, district, size_ping, floor, url）、enrichment 欄位（community_name, parking_desc, public_ratio 等）和 `is_enriched` 標記。
 - **notifications_sent** — 已發送通知的紀錄。以 `(source, listing_id, channel)` 唯一識別。（歷史遺留，新版改用 listings_read）
 - **listings_read** — 使用者已讀物件追蹤。以 `(source, listing_id)` 唯一識別，記錄讀取時的 `raw_hash`。當物件 raw_hash 變更（內容更新）時自動重新視為未讀。
+- **favorites** — 使用者收藏的物件。以 `(source, listing_id)` 唯一識別，透過 `/list` 詳情頁的星號按鈕操作。
 - **bot_config** — Bot 模式的設定存儲（key-value JSON）。所有設定透過 Telegram inline keyboard 管理。
 
 ## Architecture
@@ -71,17 +72,25 @@ docker compose logs -f                 # View logs
 - **regions.py** — 全台 22 縣市的 region code 和 district section code。買賣/租房的 section code 完全不同（如內湖區：buy=10, rent=5）。Section codes 須與 591 BFF API 實際回傳值一致
 - **scraper.py** — 591 爬蟲。`scrape_listings()` 為統一入口，依 mode 分派到 `scrape_buy_listings()` 或 `scrape_rent_listings()`
 - **config.py** — YAML 設定載入與驗證（CLI mode）。`SearchConfig.regions: list[int]` 支援多地區
+- **dedup.py** — 物件去重引擎。使用 `entity_fingerprint`（地址+社區正規化後的 hash）識別同一實體，`score_duplicate()` 計算兩物件相似度（標題、地址、價格、坪數加權），超過門檻視為重複
+- **dedup_cleanup.py** — 歷史去重清理。掃描 DB 中 fingerprint 相同的群組，規劃合併（保留 canonical listing，遷移關聯表記錄），支援 dry-run 和 batch apply
+- **map_preview.py** — Google Maps Static API 地圖縮圖產生與快取。支援 Geocoding API 地址→座標轉換，檔案級快取（可設 TTL），失敗時自動降級
 - **templates.py** — 預設設定模板，用於 Bot 快速設定
 
 ## Bot Commands
 
 - `/start` — 首次設定引導或歡迎訊息
 - `/list` — 互動式瀏覽未讀物件（分頁、區域篩選、詳情展開、標記已讀）
+- `/favorites` — 查看最愛物件
 - `/settings` — 透過 inline keyboard 修改任何參數（模式、地區、區域、價格、坪數、關鍵字、頁數、排程）
 - `/status` — 當前設定摘要、排程狀態、DB 統計（含未讀數）
+- `/help` — 指令列表
 - `/run` — 手動觸發 pipeline（完成後顯示未讀物件摘要，引導使用 /list 查看）
+- `/dedupall [batch_size]` — 以 batch 方式執行全庫去重，直到無剩餘群組
 - `/pause` / `/resume` — 控制自動排程
 - `/loglevel DEBUG|INFO|WARNING|ERROR` — 動態調整 log level
+- `/config_export` — 匯出目前設定為 JSON
+- `/config_import` — 匯入設定（JSON）
 
 ## Key Technical Gotchas
 
@@ -109,4 +118,4 @@ Config 支援中文優先格式：`regions: ["台北市", "新北市"]`、`distr
 
 ## Testing
 
-Tests use `tmp_path` for isolated SQLite DBs. External APIs (Telegram, 591) are mocked. Test helpers like `_listing(**overrides)` create test data with sensible defaults.
+Tests use `tmp_path` for isolated SQLite DBs. External APIs (Telegram, 591) are mocked. Test helpers like `_listing(**overrides)` create test data with sensible defaults. 目前共 203 個測試。
