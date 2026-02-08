@@ -1253,6 +1253,11 @@ def _get_matched(
     return listings
 
 
+def _get_unread_matched(storage: Storage, db_config: DbConfig, district_filter: str | None = None) -> list[dict]:
+    """Backward-compatible helper used by tests and legacy call sites."""
+    return _get_matched(storage, db_config, district_filter=district_filter, include_read=False)
+
+
 def _build_list_keyboard(
     listings: list[dict],
     offset: int,
@@ -1305,11 +1310,6 @@ def _build_list_keyboard(
         buttons.append([InlineKeyboardButton(
             label_main, callback_data=f"{context}:d:{listing['listing_id']}"
         )])
-        if title:
-            title_btn_text = title if len(title) <= 60 else title[:57] + "..."
-            buttons.append([InlineKeyboardButton(
-                title_btn_text, callback_data=f"{context}:d:{listing['listing_id']}"
-            )])
 
     # Navigation row
     nav_row = []
@@ -1317,22 +1317,22 @@ def _build_list_keyboard(
     total_pages = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
 
     if offset > 0:
-        nav_row.append(InlineKeyboardButton("◀ 上一頁", callback_data=f"list:p:{offset - LIST_PAGE_SIZE}"))
-    nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="list:noop"))
+        nav_row.append(InlineKeyboardButton("◀ 上一頁", callback_data=f"{context}:p:{offset - LIST_PAGE_SIZE}"))
+    nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data=f"{context}:noop"))
     if offset + LIST_PAGE_SIZE < total:
-        nav_row.append(InlineKeyboardButton("下一頁 ▶", callback_data=f"list:p:{offset + LIST_PAGE_SIZE}"))
+        nav_row.append(InlineKeyboardButton("下一頁 ▶", callback_data=f"{context}:p:{offset + LIST_PAGE_SIZE}"))
     if total_pages > 1 or total > 0:
         buttons.append(nav_row)
 
     # Action row
     toggle_label = "顯示已讀" if not show_read else "隱藏已讀"
-    action_row = [
-        InlineKeyboardButton("篩選", callback_data=f"{context}:filter"),
-        InlineKeyboardButton(toggle_label, callback_data=f"{context}:toggle_read"),
-    ]
+    action_row = []
     if context == "list":
+        action_row.append(InlineKeyboardButton("篩選", callback_data="list:filter"))
+        action_row.append(InlineKeyboardButton(toggle_label, callback_data="list:toggle_read"))
         action_row.append(InlineKeyboardButton("全部已讀", callback_data="list:ra"))
     elif context == "fav":
+        action_row.append(InlineKeyboardButton(toggle_label, callback_data="fav:toggle_read"))
         action_row.append(InlineKeyboardButton("清空最愛", callback_data="fav:clear"))
     buttons.append(action_row)
 
@@ -1508,15 +1508,17 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         listing_id = data.split(":")[3]
         storage.add_favorite("591", listing_id)
         listing = storage.get_listing_by_id("591", listing_id) or {}
+        buttons = [
+            [
+                InlineKeyboardButton("◀ 返回列表", callback_data="list:back"),
+                InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None,
+            ],
+            [InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{listing_id}")],
+        ]
+        buttons = [[b for b in row if b] for row in buttons]
         await query.edit_message_text(
             "已加入最愛",
-            reply_markup=InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton("◀ 返回列表", callback_data="list:back"),
-                    InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None
-                ],
-                 [InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{listing_id}")]
-                ])
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
         return
 
@@ -1524,15 +1526,17 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         listing_id = data.split(":")[3]
         storage.remove_favorite("591", listing_id)
         listing = storage.get_listing_by_id("591", listing_id) or {}
+        buttons = [
+            [
+                InlineKeyboardButton("◀ 返回列表", callback_data="list:back"),
+                InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None,
+            ],
+            [InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{listing_id}")],
+        ]
+        buttons = [[b for b in row if b] for row in buttons]
         await query.edit_message_text(
             "已從最愛移除",
-            reply_markup=InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton("◀ 返回列表", callback_data="list:back"),
-                    InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None
-                ],
-                 [InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{listing_id}")]
-                ])
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
         return
 
@@ -1672,13 +1676,13 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
 
     loop = asyncio.get_running_loop()
     bot = context.bot
+    progress_chat_id = db_config.get("telegram.chat_id")
 
     def _progress(msg: str):
         """Send lightweight progress message to chat asynchronously."""
-        chat_id = db_config.get("telegram.chat_id")
-        if not chat_id:
+        if not progress_chat_id:
             return
-        coro = bot.send_message(chat_id=int(chat_id), text=f"[進度] {msg}")
+        coro = bot.send_message(chat_id=int(progress_chat_id), text=f"[進度] {msg}")
         try:
             running_loop = asyncio.get_running_loop()
             if running_loop == loop:
@@ -1730,7 +1734,7 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
         matched_count = len(matched)
 
         # Count unread matched (for summary)
-        unread_matched = _get_unread_matched(storage, db_config)
+        unread_matched = _get_matched(storage, db_config, include_read=False)
         unread_count = len(unread_matched)
 
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
