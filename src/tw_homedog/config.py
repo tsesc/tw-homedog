@@ -81,6 +81,7 @@ class ScraperConfig:
     delay_max: int = 5
     timeout: int = 30
     max_retries: int = 3
+    max_workers: int = 4
 
 
 @dataclass
@@ -258,6 +259,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             delay_max=scraper_raw.get("delay_max", 5),
             timeout=scraper_raw.get("timeout", 30),
             max_retries=scraper_raw.get("max_retries", 3),
+            max_workers=scraper_raw.get("max_workers", 4),
         ),
         maps=MapConfig(
             enabled=maps_raw.get("enabled", False),

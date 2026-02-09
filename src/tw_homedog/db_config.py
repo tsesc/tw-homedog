@@ -38,6 +38,7 @@ DEFAULTS = {
     "scraper.delay_max": 5,
     "scraper.timeout": 30,
     "scraper.max_retries": 3,
+    "scraper.max_workers": 4,
     "scheduler.interval_minutes": 120,
     "maps.enabled": False,
     "maps.base_url": "https://maps.googleapis.com/maps/api/staticmap",
@@ -223,6 +224,7 @@ class DbConfig:
                 delay_max=_get("scraper.delay_max", 5),
                 timeout=_get("scraper.timeout", 30),
                 max_retries=_get("scraper.max_retries", 3),
+                max_workers=_get("scraper.max_workers", 4),
             ),
             maps=MapConfig(
                 enabled=_get("maps.enabled", False),

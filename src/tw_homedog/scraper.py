@@ -1,10 +1,18 @@
 """591 scraper: supports both rent and buy modes via BFF API + Playwright."""
 
+from __future__ import annotations
+
 import logging
 import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tw_homedog.storage import Storage
 
 import requests
 from bs4 import BeautifulSoup
@@ -200,7 +208,7 @@ def _extract_detail_fields(data: dict) -> dict:
     result = {}
 
     # From ware object
-    ware = data.get("ware") or {}
+    ware = data.get("ware") if isinstance(data.get("ware"), dict) else {}
     main_area = ware.get("mainarea")
     if main_area is not None:
         try:
@@ -209,11 +217,41 @@ def _extract_detail_fields(data: dict) -> dict:
             pass
     result["community_name"] = ware.get("community_name") or None
 
+    # Coordinates from 591 detail API — check ware first, then location object
+    location = data.get("location") if isinstance(data.get("location"), dict) else {}
+    for lat_key in ("position_lat", "lat", "wgs84_y"):
+        raw_lat = ware.get(lat_key)
+        if raw_lat is not None:
+            try:
+                result["lat"] = float(raw_lat)
+                break
+            except (ValueError, TypeError):
+                pass
+    if "lat" not in result and location.get("lat"):
+        try:
+            result["lat"] = float(location["lat"])
+        except (ValueError, TypeError):
+            pass
+    for lng_key in ("position_lng", "lng", "wgs84_x"):
+        raw_lng = ware.get(lng_key)
+        if raw_lng is not None:
+            try:
+                result["lng"] = float(raw_lng)
+                break
+            except (ValueError, TypeError):
+                pass
+    if "lng" not in result and location.get("lng"):
+        try:
+            result["lng"] = float(location["lng"])
+        except (ValueError, TypeError):
+            pass
+
     # From info sections
-    info = data.get("info") or {}
+    info = data.get("info") if isinstance(data.get("info"), dict) else {}
 
     # info['3'] contains: CarPlace, RatioRate, Fitment, ManagePrice, Shape
-    info3 = info.get("3") or []
+    raw_info3 = info.get("3")
+    info3 = raw_info3 if isinstance(raw_info3, list) else []
     for item in info3:
         name = item.get("name", "")
         value = item.get("value", "")
@@ -229,7 +267,8 @@ def _extract_detail_fields(data: dict) -> dict:
             result["shape_name"] = value or None
 
     # info['2'] contains: Direction
-    info2 = info.get("2") or []
+    raw_info2 = info.get("2")
+    info2 = raw_info2 if isinstance(raw_info2, list) else []
     for item in info2:
         name = item.get("name", "")
         value = item.get("value", "")
@@ -251,14 +290,24 @@ def fetch_buy_listing_detail(
             logger.warning("Detail API returned %d for house_id=%s", resp.status_code, house_id)
             return None
         body = resp.json()
-        if body.get("status") != 1:
+        logger.debug(
+            "Detail API house_id=%s: status=%s, top-level keys=%s, type(data)=%s",
+            house_id, body.get("status"), list(body.keys()), type(body.get("data")),
+        )
+        raw_data = body.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
+        # status=0 responses may put ware/info/location at top level
+        if not data.get("ware") and isinstance(body.get("ware"), dict):
+            data = body
+        if body.get("status") != 1 and not data.get("ware"):
             logger.warning(
                 "Detail API error for house_id=%s: status=%s msg=%s",
                 house_id, body.get("status"), body.get("msg", ""),
             )
             logger.debug("Detail API full response for house_id=%s: %s", house_id, body)
             return None
-        return _extract_detail_fields(body.get("data", {}))
+        logger.debug("Detail data keys for house_id=%s: %s", house_id, list(data.keys()))
+        return _extract_detail_fields(data)
     except Exception as e:
         logger.error("Failed to fetch detail for house_id=%s: %s", house_id, e)
         return None
@@ -269,13 +318,36 @@ def enrich_buy_listings(
     session: requests.Session,
     headers: dict,
     listing_ids: list[str],
+    *,
+    storage: "Storage | None" = None,
 ) -> dict[str, dict]:
-    """Fetch detail data for multiple buy listings. Returns {listing_id: detail_dict}."""
+    """Fetch detail data for multiple buy listings. Returns {listing_id: detail_dict}.
+
+    When *storage* is provided and the detail API does not return coordinates,
+    a Google Maps Geocoding fallback is attempted using the listing's address
+    (requires ``config.maps.api_key`` to be set).
+    """
+    from tw_homedog.map_preview import geocode_address
+
+    maps_api_key = getattr(getattr(config, "maps", None), "api_key", None)
+    geocode_cache: dict = {}
     results = {}
     for i, lid in enumerate(listing_ids):
         logger.info("Enriching detail %d/%d: %s", i + 1, len(listing_ids), lid)
         detail = fetch_buy_listing_detail(session, headers, lid, timeout=config.scraper.timeout)
         if detail:
+            # Geocoding fallback when 591 doesn't provide coordinates
+            if detail.get("lat") is None and detail.get("lng") is None and maps_api_key and storage:
+                listing = storage.get_listing_by_id("591", lid)
+                address = (listing or {}).get("address") or ""
+                if address:
+                    lat, lng = geocode_address(
+                        address, api_key=maps_api_key, cache=geocode_cache,
+                    )
+                    if lat is not None and lng is not None:
+                        detail["lat"] = lat
+                        detail["lng"] = lng
+                        logger.debug("Geocoded %s → (%s, %s)", lid, lat, lng)
             results[lid] = detail
         if i < len(listing_ids) - 1:
             time.sleep(random.uniform(config.scraper.delay_min, config.scraper.delay_max))
@@ -519,43 +591,79 @@ def scrape_rent_listings(config: Config, progress_cb=None) -> list[dict]:
 # Unified entry point
 # =============================================================================
 
+def _build_region_config(config: Config, region_id: int) -> Config:
+    """Create a single-region config clone for backward compat with helpers."""
+    return Config(
+        search=SearchConfig(
+            regions=[region_id],
+            districts=config.search.districts,
+            price_min=config.search.price_min,
+            price_max=config.search.price_max,
+            mode=config.search.mode,
+            min_ping=config.search.min_ping,
+            max_ping=config.search.max_ping,
+            room_counts=config.search.room_counts,
+            bathroom_counts=config.search.bathroom_counts,
+            year_built_min=config.search.year_built_min,
+            year_built_max=config.search.year_built_max,
+            keywords_include=config.search.keywords_include,
+            keywords_exclude=config.search.keywords_exclude,
+            max_pages=config.search.max_pages,
+        ),
+        telegram=config.telegram,
+        database_path=config.database_path,
+        scraper=config.scraper,
+    )
+
+
+def _scrape_single_region(config: Config, region_id: int, progress_cb=None) -> list[dict]:
+    """Scrape a single region. Designed to run in its own thread."""
+    temp_config = _build_region_config(config, region_id)
+    if config.search.mode == 'buy':
+        return scrape_buy_listings(temp_config, progress_cb=progress_cb)
+    else:
+        return scrape_rent_listings(temp_config, progress_cb=progress_cb)
+
+
 def scrape_listings(config: Config, progress_cb=None) -> list[dict]:
     """Scrape listings based on config mode (rent or buy).
 
-    Loops through all configured regions and combines results.
+    Uses ThreadPoolExecutor for parallel scraping when multiple regions
+    are configured. Single region is scraped directly without thread pool.
     """
+    regions = config.search.regions
+
+    # Single region: direct call, no thread pool overhead
+    if len(regions) <= 1:
+        region_id = regions[0] if regions else 1
+        return _scrape_single_region(config, region_id, progress_cb=progress_cb)
+
+    # Multiple regions: parallel scraping
+    lock = threading.Lock()
+
+    def safe_progress_cb(msg):
+        if progress_cb:
+            with lock:
+                progress_cb(msg)
+
+    max_workers = min(len(regions), getattr(config.scraper, 'max_workers', 4))
     all_listings = []
-    mode = config.search.mode
 
-    for region_id in config.search.regions:
-        # Create a temporary config with single region for backward compat with helpers
-        temp_config = Config(
-            search=SearchConfig(
-                regions=[region_id],
-                districts=config.search.districts,
-                price_min=config.search.price_min,
-                price_max=config.search.price_max,
-                mode=config.search.mode,
-                min_ping=config.search.min_ping,
-                max_ping=config.search.max_ping,
-                room_counts=config.search.room_counts,
-                bathroom_counts=config.search.bathroom_counts,
-                year_built_min=config.search.year_built_min,
-                year_built_max=config.search.year_built_max,
-                keywords_include=config.search.keywords_include,
-                keywords_exclude=config.search.keywords_exclude,
-                max_pages=config.search.max_pages,
-            ),
-            telegram=config.telegram,
-            database_path=config.database_path,
-            scraper=config.scraper,
-        )
+    logger.info("Starting parallel scrape for %d regions (max_workers=%d)", len(regions), max_workers)
 
-        if mode == 'buy':
-            listings = scrape_buy_listings(temp_config, progress_cb=progress_cb)
-        else:
-            listings = scrape_rent_listings(temp_config, progress_cb=progress_cb)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_scrape_single_region, config, rid, safe_progress_cb): rid
+            for rid in regions
+        }
+        for future in as_completed(futures):
+            rid = futures[future]
+            try:
+                listings = future.result()
+                all_listings.extend(listings)
+                logger.info("Region %d: got %d listings", rid, len(listings))
+            except Exception:
+                logger.exception("Region %d scrape failed", rid)
 
-        all_listings.extend(listings)
-
+    logger.info("Parallel scrape complete: %d total listings from %d regions", len(all_listings), len(regions))
     return all_listings

@@ -23,9 +23,12 @@ from telegram.ext import (
     filters,
 )
 
+from telegram.error import TelegramError
+
 from tw_homedog.db_config import DbConfig
 from tw_homedog.dedup_cleanup import run_cleanup
 from tw_homedog.log import set_log_level
+from tw_homedog.map_preview import MapConfig, MapThumbnailProvider
 from tw_homedog.matcher import find_matching_listings
 from tw_homedog.normalizer import normalize_591_listing
 from tw_homedog.notifier import format_listing_message
@@ -60,7 +63,8 @@ logger = logging.getLogger(__name__)
     SETTINGS_SCHEDULE_INPUT,
     SETTINGS_PAGES_INPUT,
     SETTINGS_REGION_INPUT,
-) = range(17)
+    SETTINGS_MAPS_APIKEY_INPUT,
+) = range(18)
 
 # Reverse lookup: region_id → Chinese name
 _REGION_ID_TO_NAME: dict[int, str] = {v: k for k, v in REGION_CODES.items()}
@@ -747,6 +751,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         ],
         [
             InlineKeyboardButton("排程", callback_data="settings:schedule"),
+            InlineKeyboardButton("地圖", callback_data="settings:maps"),
         ],
     ]
     await update.message.reply_text(
@@ -881,6 +886,28 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "請輸入新的間隔（分鐘）："
         )
         return SETTINGS_SCHEDULE_INPUT
+
+    elif data == "settings:maps":
+        enabled = db_config.get("maps.enabled", False)
+        has_key = bool(db_config.get("maps.api_key"))
+        status = "已開啟" if enabled else "已關閉"
+        key_status = "已設定" if has_key else "未設定"
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{'🟢' if enabled else '⚪'} {'關閉' if enabled else '開啟'}地圖縮圖",
+                    callback_data="set_maps:toggle",
+                ),
+            ],
+            [
+                InlineKeyboardButton("🔑 設定 API Key", callback_data="set_maps:apikey"),
+            ],
+        ]
+        await query.edit_message_text(
+            f"地圖縮圖設定\n狀態：{status}\nAPI Key：{key_status}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SETTINGS_MENU
 
     return None
 
@@ -1288,6 +1315,57 @@ async def settings_schedule_handler(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 
+async def set_maps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle maps settings button presses."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    db_config: DbConfig = context.bot_data["db_config"]
+
+    if data == "set_maps:toggle":
+        enabled = not db_config.get("maps.enabled", False)
+        db_config.set("maps.enabled", enabled)
+        has_key = bool(db_config.get("maps.api_key"))
+        status = "已開啟" if enabled else "已關閉"
+        key_status = "已設定" if has_key else "未設定"
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{'🟢' if enabled else '⚪'} {'關閉' if enabled else '開啟'}地圖縮圖",
+                    callback_data="set_maps:toggle",
+                ),
+            ],
+            [
+                InlineKeyboardButton("🔑 設定 API Key", callback_data="set_maps:apikey"),
+            ],
+        ]
+        await query.edit_message_text(
+            f"地圖縮圖設定\n狀態：{status}\nAPI Key：{key_status}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SETTINGS_MENU
+
+    elif data == "set_maps:apikey":
+        await query.edit_message_text("請輸入 Google Maps API Key：")
+        return SETTINGS_MAPS_APIKEY_INPUT
+
+    return SETTINGS_MENU
+
+
+async def settings_maps_apikey_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle maps API key text input."""
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("API Key 不可為空，請重新輸入：")
+        return SETTINGS_MAPS_APIKEY_INPUT
+
+    db_config: DbConfig = context.bot_data["db_config"]
+    db_config.set("maps.api_key", text)
+    summary = _config_summary(db_config)
+    await update.message.reply_text(f"已更新 Google Maps API Key\n\n{summary}")
+    return ConversationHandler.END
+
+
 # =============================================================================
 # Listing browser (/list)
 # =============================================================================
@@ -1355,28 +1433,6 @@ def _get_matched(
             for l in listings:
                 l["is_read"] = False
         listings = _filter_matched(listings, config, district_filter)
-
-    # Enrich buy listings on the fly so community/age fields are available in list view
-    if not only_favorites and config.search.mode == "buy" and listings:
-        matched_ids = [m["listing_id"] for m in listings]
-        unenriched = storage.get_unenriched_listing_ids(matched_ids)
-        if unenriched:
-            try:
-                session, headers = _get_buy_session_headers(config)
-                details = enrich_buy_listings(config, session, headers, unenriched)
-                for lid, detail in details.items():
-                    storage.update_listing_detail("591", lid, detail)
-                # re-fetch to reflect enrichment & read status
-                if include_read:
-                    listings = storage.get_listings_with_read_status()
-                    listings = _filter_matched(listings, config, district_filter)
-                else:
-                    listings = storage.get_unread_listings()
-                    for l in listings:
-                        l["is_read"] = False
-                    listings = _filter_matched(listings, config, district_filter)
-            except Exception as e:
-                logger.warning("Enrich failed during list retrieval: %s", e)
 
     # Mark favorites flag if needed for general lists
     if not only_favorites:
@@ -1530,6 +1586,16 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     show_read = bool(context.user_data.get("_list_show_read", False))
     matched = _get_matched(storage, db_config, include_read=show_read)
     if not matched:
+        if not show_read:
+            all_matched = _get_matched(storage, db_config, include_read=True)
+            if all_matched:
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📖 顯示已讀物件", callback_data="list:toggle_read")
+                ]])
+                await update.message.reply_text(
+                    f"目前沒有未讀物件（已讀 {len(all_matched)} 筆）", reply_markup=kb
+                )
+                return
         await update.message.reply_text("目前沒有符合條件的物件")
         return
 
@@ -1589,6 +1655,10 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Auto-mark as read
         storage.mark_as_read("591", listing_id)
 
+        # Enrich on detail view (single listing, in background thread)
+        if mode == "buy" and not listing.get("is_enriched"):
+            listing = await _enrich_single(db_config, storage, listing_id) or listing
+
         is_fav = storage.is_favorite("591", listing_id)
         msg = format_listing_message(listing, mode=mode)
         buttons = [
@@ -1601,21 +1671,65 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         buttons.append([fav_btn])
         # Clean None
         buttons = [[b for b in row if b] for row in buttons]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        # Try sending map thumbnail if available
+        provider = _get_map_provider(db_config)
+        lat = listing.get("lat")
+        lng = listing.get("lng")
+        logger.debug(
+            "list:d: listing=%s provider=%s lat=%s lng=%s",
+            listing_id, provider is not None, lat, lng,
+        )
+        if provider and lat is not None and lng is not None:
+            thumb = provider.get_thumbnail(
+                address=listing.get("address", ""), lat=lat, lng=lng,
+            )
+            logger.debug("list:d: thumb=%s", thumb)
+            if thumb:
+                try:
+                    await query.message.delete()
+                except TelegramError:
+                    pass
+                sent = await _send_detail_photo(
+                    context.bot, query.message.chat_id, msg, thumb, keyboard, provider,
+                )
+                logger.debug("list:d: send_photo sent=%s", sent)
+                if sent:
+                    return
+                # Fallback: send as plain text
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text=msg, reply_markup=keyboard,
+                )
+                return
+
+        await query.edit_message_text(msg, reply_markup=keyboard)
         return
 
     # Back to list
     if data == "list:back":
         matched = _get_matched(storage, db_config, district_filter, include_read=show_read)
         if not matched:
-            await query.edit_message_text("目前沒有符合條件的物件")
+            try:
+                await query.edit_message_text("目前沒有符合條件的物件")
+            except TelegramError:
+                await query.message.delete()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text="目前沒有符合條件的物件",
+                )
             return
         page = matched[:LIST_PAGE_SIZE]
         keyboard = _build_list_keyboard(page, 0, len(matched), mode, district_filter, show_read)
         label = f"{'含已讀，' if show_read else ''}物件數：{len(matched)} 筆"
         if district_filter:
             label += f"（{district_filter}）"
-        await query.edit_message_text(label, reply_markup=keyboard)
+        try:
+            await query.edit_message_text(label, reply_markup=keyboard)
+        except TelegramError:
+            await query.message.delete()
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, text=label, reply_markup=keyboard,
+            )
         return
 
     # Show filter options
@@ -1665,6 +1779,16 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data["_list_show_read"] = show_read
         matched = _get_matched(storage, db_config, district_filter, include_read=show_read)
         if not matched:
+            if not show_read:
+                all_matched = _get_matched(storage, db_config, district_filter, include_read=True)
+                if all_matched:
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📖 顯示已讀物件", callback_data="list:toggle_read")
+                    ]])
+                    await query.edit_message_text(
+                        f"目前沒有未讀物件（已讀 {len(all_matched)} 筆）", reply_markup=kb
+                    )
+                    return
             await query.edit_message_text("目前沒有符合條件的物件")
             return
         page = matched[:LIST_PAGE_SIZE]
@@ -1699,10 +1823,14 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             [InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{listing_id}")],
         ]
         buttons = [[b for b in row if b] for row in buttons]
-        await query.edit_message_text(
-            "已加入最愛",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        keyboard = InlineKeyboardMarkup(buttons)
+        try:
+            await query.edit_message_text("已加入最愛", reply_markup=keyboard)
+        except TelegramError:
+            try:
+                await query.edit_message_caption(caption="已加入最愛", reply_markup=keyboard)
+            except TelegramError:
+                pass
         return
 
     if data.startswith("list:fav:del:"):
@@ -1717,11 +1845,114 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             [InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{listing_id}")],
         ]
         buttons = [[b for b in row if b] for row in buttons]
-        await query.edit_message_text(
-            "已從最愛移除",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        keyboard = InlineKeyboardMarkup(buttons)
+        try:
+            await query.edit_message_text("已從最愛移除", reply_markup=keyboard)
+        except TelegramError:
+            try:
+                await query.edit_message_caption(caption="已從最愛移除", reply_markup=keyboard)
+            except TelegramError:
+                pass
         return
+
+
+# =============================================================================
+# Detail enrichment helper
+# =============================================================================
+
+
+async def _enrich_single(db_config: DbConfig, storage: Storage, listing_id: str) -> dict | None:
+    """Enrich a single listing in a background thread. Returns refreshed listing or None."""
+    try:
+        config = db_config.build_config()
+    except ValueError:
+        return None
+    if config.search.mode != "buy":
+        return None
+
+    unenriched = storage.get_unenriched_listing_ids([listing_id])
+    if not unenriched:
+        return None
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _do_enrich():
+            s, h = _get_buy_session_headers(config)
+            return enrich_buy_listings(config, s, h, unenriched, storage=storage)
+
+        loop = asyncio.get_event_loop()
+        details = await loop.run_in_executor(None, _do_enrich)
+        for lid, detail in details.items():
+            storage.update_listing_detail("591", lid, detail)
+        return storage.get_listing_by_id("591", listing_id)
+    except Exception as e:
+        logger.warning("Enrich single listing %s failed: %s", listing_id, e)
+        return None
+
+
+# =============================================================================
+# Map preview helpers
+# =============================================================================
+
+
+def _get_map_provider(db_config: DbConfig) -> MapThumbnailProvider | None:
+    """Build a MapThumbnailProvider from current db_config, or None if maps disabled."""
+    enabled = db_config.get("maps.enabled", False)
+    api_key = db_config.get("maps.api_key")
+    if not enabled or not api_key:
+        logger.debug("_get_map_provider: enabled=%s api_key=%s → skip", enabled, bool(api_key))
+        return None
+    from tw_homedog.db_config import DEFAULTS
+    cfg = MapConfig(
+        enabled=True,
+        api_key=api_key,
+        base_url=db_config.get("maps.base_url", DEFAULTS["maps.base_url"]),
+        size=db_config.get("maps.size", DEFAULTS["maps.size"]),
+        zoom=db_config.get("maps.zoom", DEFAULTS["maps.zoom"]),
+        scale=db_config.get("maps.scale", DEFAULTS["maps.scale"]),
+        language=db_config.get("maps.language", DEFAULTS["maps.language"]),
+        region=db_config.get("maps.region", DEFAULTS["maps.region"]),
+        timeout=db_config.get("maps.timeout", DEFAULTS["maps.timeout"]),
+        cache_ttl_seconds=db_config.get("maps.cache_ttl_seconds", DEFAULTS["maps.cache_ttl_seconds"]),
+        cache_dir=db_config.get("maps.cache_dir", DEFAULTS["maps.cache_dir"]),
+        style=db_config.get("maps.style", DEFAULTS["maps.style"]),
+    )
+    return MapThumbnailProvider(cfg)
+
+
+async def _send_detail_photo(
+    bot: Bot,
+    chat_id: int,
+    caption: str,
+    thumb,
+    reply_markup: InlineKeyboardMarkup,
+    provider: MapThumbnailProvider,
+) -> bool:
+    """Send a photo message with caption and keyboard. Returns True on success."""
+    try:
+        if thumb.file_id:
+            msg = await bot.send_photo(
+                chat_id=chat_id, photo=thumb.file_id,
+                caption=caption, reply_markup=reply_markup,
+            )
+        elif thumb.file_path and thumb.file_path.exists():
+            with thumb.file_path.open("rb") as f:
+                msg = await bot.send_photo(
+                    chat_id=chat_id, photo=f,
+                    caption=caption, reply_markup=reply_markup,
+                )
+        else:
+            return False
+        # Remember file_id for future cache
+        if msg and getattr(msg, "photo", None):
+            file_id = msg.photo[-1].file_id
+            if file_id:
+                provider.remember_file_id(thumb.cache_key, file_id)
+        return True
+    except TelegramError as e:
+        logger.warning("Failed to send detail photo: %s", e)
+        return False
 
 
 # =============================================================================
@@ -1786,6 +2017,11 @@ async def favorites_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text("找不到此物件（可能已被刪除）")
             return
         storage.mark_as_read("591", listing_id)
+
+        # Enrich on detail view (single listing, in background thread)
+        if mode == "buy" and not listing.get("is_enriched"):
+            listing = await _enrich_single(db_config, storage, listing_id) or listing
+
         msg = format_listing_message(listing, mode=mode)
         buttons = [
             [InlineKeyboardButton("◀ 返回最愛", callback_data="fav:back"),
@@ -1793,17 +2029,56 @@ async def favorites_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("🗑 取消最愛", callback_data=f"fav:del:{listing_id}")]
         ]
         buttons = [[b for b in row if b] for row in buttons]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        # Try sending map thumbnail if available
+        provider = _get_map_provider(db_config)
+        lat = listing.get("lat")
+        lng = listing.get("lng")
+        if provider and lat is not None and lng is not None:
+            thumb = provider.get_thumbnail(
+                address=listing.get("address", ""), lat=lat, lng=lng,
+            )
+            if thumb:
+                try:
+                    await query.message.delete()
+                except TelegramError:
+                    pass
+                sent = await _send_detail_photo(
+                    context.bot, query.message.chat_id, msg, thumb, keyboard, provider,
+                )
+                if sent:
+                    return
+                # Fallback: send as plain text
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text=msg, reply_markup=keyboard,
+                )
+                return
+
+        await query.edit_message_text(msg, reply_markup=keyboard)
         return
 
     if data == "fav:back":
         favs = _favorite_dataset(storage, show_read=show_read)
         if not favs:
-            await query.edit_message_text("沒有最愛可顯示")
+            try:
+                await query.edit_message_text("沒有最愛可顯示")
+            except TelegramError:
+                await query.message.delete()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text="沒有最愛可顯示",
+                )
             return
         page = favs[:LIST_PAGE_SIZE]
         keyboard = _build_list_keyboard(page, 0, len(favs), mode, show_read=show_read, context="fav")
-        await query.edit_message_text(f"最愛：{len(favs)} 筆" + ("（含已讀）" if show_read else ""), reply_markup=keyboard)
+        label = f"最愛：{len(favs)} 筆" + ("（含已讀）" if show_read else "")
+        try:
+            await query.edit_message_text(label, reply_markup=keyboard)
+        except TelegramError:
+            await query.message.delete()
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, text=label, reply_markup=keyboard,
+            )
         return
 
     if data == "fav:toggle_read":
@@ -1828,11 +2103,24 @@ async def favorites_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         storage.remove_favorite("591", listing_id)
         favs = _favorite_dataset(storage, show_read=show_read)
         if not favs:
-            await query.edit_message_text("已刪除，現在沒有最愛")
+            try:
+                await query.edit_message_text("已刪除，現在沒有最愛")
+            except TelegramError:
+                await query.message.delete()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id, text="已刪除，現在沒有最愛",
+                )
             return
         page = favs[:LIST_PAGE_SIZE]
         keyboard = _build_list_keyboard(page, 0, len(favs), mode, show_read=show_read, context="fav")
-        await query.edit_message_text(f"最愛：{len(favs)} 筆" + ("（含已讀）" if show_read else ""), reply_markup=keyboard)
+        label = f"最愛：{len(favs)} 筆" + ("（含已讀）" if show_read else "")
+        try:
+            await query.edit_message_text(label, reply_markup=keyboard)
+        except TelegramError:
+            await query.message.delete()
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, text=label, reply_markup=keyboard,
+            )
         return
 # =============================================================================
 # Pipeline execution
@@ -1931,7 +2219,8 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
                     _get_buy_session_headers, config
                 )
                 details = await asyncio.to_thread(
-                    enrich_buy_listings, config, session, headers, unenriched
+                    enrich_buy_listings, config, session, headers, unenriched,
+                    storage=storage,
                 )
                 for lid, detail in details.items():
                     storage.update_listing_detail("591", lid, detail)
@@ -2057,6 +2346,12 @@ def _config_summary(db_config: DbConfig) -> str:
     lines.append(f"頁數：{max_pages}")
     schedule_status = "已暫停" if paused else f"每 {interval} 分鐘"
     lines.append(f"排程：{schedule_status}")
+    maps_enabled = db_config.get("maps.enabled", False)
+    maps_has_key = bool(db_config.get("maps.api_key"))
+    if maps_enabled:
+        lines.append(f"地圖：{'已開啟' if maps_has_key else '已開啟（缺 API Key）'}")
+    else:
+        lines.append("地圖：已關閉")
     return "\n".join(lines)
 
 
@@ -2239,6 +2534,7 @@ def create_application(
             SETTINGS_MENU: [
                 CallbackQueryHandler(settings_callback, pattern=r"^settings:"),
                 CallbackQueryHandler(set_mode_callback, pattern=r"^set_mode:"),
+                CallbackQueryHandler(set_maps_callback, pattern=r"^set_maps:"),
                 CallbackQueryHandler(settings_district_callback, pattern=r"^district_"),
                 CallbackQueryHandler(layout_callback, pattern=r"^layout:"),
             ],
@@ -2268,6 +2564,9 @@ def create_application(
             ],
             SETTINGS_REGION_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_region_handler),
+            ],
+            SETTINGS_MAPS_APIKEY_INPUT: [
+                MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_maps_apikey_handler),
             ],
             CONFIG_IMPORT_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, config_import_handler),

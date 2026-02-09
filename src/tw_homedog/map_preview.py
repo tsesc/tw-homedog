@@ -37,6 +37,48 @@ class MapConfig:
     style: str | None = None
 
 
+def geocode_address(
+    address: str,
+    *,
+    api_key: str,
+    language: str = "zh-TW",
+    region: str = "tw",
+    timeout: int = 6,
+    cache: dict | None = None,
+) -> tuple[Optional[float], Optional[float]]:
+    """Geocode an address via Google Maps Geocoding API.
+
+    Returns (lat, lng) or (None, None) on failure.
+    If *cache* dict is provided, results are stored/retrieved from it
+    to avoid duplicate API calls within the same batch.
+    """
+    if cache is not None:
+        cached = cache.get(address)
+        if cached:
+            return cached.get("lat"), cached.get("lng")
+
+    geocode_url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": address, "language": language, "region": region, "key": api_key}
+    try:
+        resp = requests.get(geocode_url, params=params, timeout=timeout)
+        if resp.status_code != 200:
+            logger.warning("Geocode request failed: %s %s", resp.status_code, resp.text[:200])
+            return None, None
+        data = resp.json()
+        results = data.get("results") or []
+        if not results:
+            logger.info("Geocode no results for address: %s", address)
+            return None, None
+        location = results[0]["geometry"]["location"]
+        lat, lng = float(location["lat"]), float(location["lng"])
+        if cache is not None:
+            cache[address] = {"lat": lat, "lng": lng}
+        return lat, lng
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        logger.warning("Geocode error for %s: %s", address, exc)
+        return None, None
+
+
 class MapThumbnailProvider:
     def __init__(self, config: MapConfig):
         self.config = config
@@ -55,6 +97,7 @@ class MapThumbnailProvider:
         if not self.config.enabled:
             return None
         if not address and (lat is None or lng is None):
+            logger.debug("Map skipped: no address and no coordinates")
             return None
         if not self.config.api_key:
             logger.warning("Map thumbnail requested but no API key configured; skipping")
@@ -71,17 +114,22 @@ class MapThumbnailProvider:
         file_path = self._cached_file_path(cache_key)
 
         if self._is_cache_valid(file_path):
-            logger.debug("Map cache hit for %s", cache_key)
+            logger.debug("Map cache hit for %s", cache_key[:12])
             return MapThumbnail(cache_key=cache_key, file_path=file_path, file_id=file_id)
 
+        logger.debug("Map cache miss for %s; fetching from API", cache_key[:12])
         url = self._build_request_url(address=address, lat=lat, lng=lng)
         try:
             resp = requests.get(url, timeout=self.config.timeout)
+            if resp.status_code in (429, 403):
+                logger.warning("Map API quota/auth error: %s %s", resp.status_code, resp.text[:200])
+                return None
             if resp.status_code != 200:
                 logger.warning("Static map request failed: %s %s", resp.status_code, resp.text[:200])
                 return None
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_bytes(resp.content)
+            logger.debug("Map fetched and cached: %s", cache_key[:12])
             return MapThumbnail(cache_key=cache_key, file_path=file_path, file_id=file_id)
         except requests.RequestException as exc:
             logger.warning("Static map fetch error: %s", exc)
@@ -107,26 +155,17 @@ class MapThumbnailProvider:
         if cached:
             return cached.get("lat"), cached.get("lng")
 
-        geocode_url = "https://maps.googleapis.com/maps/api/geocode/json"
-        params = {"address": address, "language": self.config.language, "region": self.config.region, "key": self.config.api_key}
-        try:
-            resp = requests.get(geocode_url, params=params, timeout=self.config.timeout)
-            if resp.status_code != 200:
-                logger.warning("Geocode request failed: %s %s", resp.status_code, resp.text[:200])
-                return None, None
-            data = resp.json()
-            results = data.get("results") or []
-            if not results:
-                logger.info("Geocode no results for address: %s", address)
-                return None, None
-            location = results[0]["geometry"]["location"]
-            lat, lng = float(location["lat"]), float(location["lng"])
+        lat, lng = geocode_address(
+            address,
+            api_key=self.config.api_key,
+            language=self.config.language,
+            region=self.config.region,
+            timeout=self.config.timeout,
+        )
+        if lat is not None and lng is not None:
             self._geocode_cache[address] = {"lat": lat, "lng": lng, "ts": time()}
             self._persist_geocode_cache()
-            return lat, lng
-        except (requests.RequestException, ValueError, KeyError) as exc:
-            logger.warning("Geocode error for %s: %s", address, exc)
-            return None, None
+        return lat, lng
 
     # ------------------------------------------------------------------
     # Helpers

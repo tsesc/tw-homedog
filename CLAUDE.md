@@ -80,7 +80,7 @@ docker compose logs -f                 # View logs
 ## Bot Commands
 
 - `/start` — 首次設定引導或歡迎訊息
-- `/list` — 互動式瀏覽未讀物件（分頁、區域篩選、詳情展開、標記已讀）
+- `/list` — 互動式瀏覽未讀物件（最新優先、分頁、區域篩選、詳情展開、標記已讀）
 - `/favorites` — 查看最愛物件
 - `/settings` — 透過 inline keyboard 修改任何參數（模式、地區、區域、價格、坪數、關鍵字、頁數、排程）
 - `/status` — 當前設定摘要、排程狀態、DB 統計（含未讀數）

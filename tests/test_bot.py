@@ -14,6 +14,7 @@ from tw_homedog.bot import (
     _get_unread_matched,
     LIST_PAGE_SIZE,
     cmd_dedupall,
+    cmd_list,
 )
 from tw_homedog.db_config import DbConfig
 from tw_homedog.regions import BUY_SECTION_CODES, RENT_SECTION_CODES
@@ -426,3 +427,68 @@ def test_cmd_dedupall_runs_until_empty(monkeypatch):
     final_text = update.message.reply_text.call_args_list[-1][0][0]
     assert "去重完成" in final_text
     mock_ensure.assert_called_once()
+
+
+# --- cmd_list empty states ---
+
+def test_cmd_list_empty_with_read_shows_toggle(storage, db_config):
+    """All listings read → show read count + toggle button."""
+    db_config.set_many({
+        "search.regions": [1],
+        "search.mode": "buy",
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 5000,
+        "telegram.bot_token": "test:TOKEN",
+        "telegram.chat_id": "123",
+    })
+    storage.insert_listing({
+        "source": "591", "listing_id": "111", "title": "test",
+        "price": 2680, "district": "大安區", "size_ping": 28.0,
+        "raw_hash": "abc",
+    })
+    storage.mark_as_read("591", "111")
+
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    context = SimpleNamespace(
+        bot_data={"storage": storage, "db_config": db_config},
+        user_data={},
+    )
+
+    asyncio.run(cmd_list(update, context))
+
+    text = update.message.reply_text.call_args[0][0]
+    assert "已讀 1 筆" in text
+    markup = update.message.reply_text.call_args[1]["reply_markup"]
+    buttons = markup.inline_keyboard
+    assert any(
+        btn.callback_data == "list:toggle_read"
+        for row in buttons for btn in row
+    )
+
+
+def test_cmd_list_empty_no_listings(storage, db_config):
+    """No listings at all → plain text, no buttons."""
+    db_config.set_many({
+        "search.regions": [1],
+        "search.mode": "buy",
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 5000,
+        "telegram.bot_token": "test:TOKEN",
+        "telegram.chat_id": "123",
+    })
+
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+    context = SimpleNamespace(
+        bot_data={"storage": storage, "db_config": db_config},
+        user_data={},
+    )
+
+    asyncio.run(cmd_list(update, context))
+
+    text = update.message.reply_text.call_args[0][0]
+    assert "目前沒有符合條件的物件" in text
+    # No reply_markup keyword argument (or None)
+    kwargs = update.message.reply_text.call_args[1]
+    assert "reply_markup" not in kwargs

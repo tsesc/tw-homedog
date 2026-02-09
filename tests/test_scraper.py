@@ -1,5 +1,7 @@
 """Tests for 591 scraper (unit tests with mocks, no real HTTP)."""
 
+from unittest.mock import patch
+
 import pytest
 
 from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
@@ -14,6 +16,9 @@ from tw_homedog.scraper import (
     _parse_listing_html,
     _normalize_buy_listing,
     _extract_detail_fields,
+    fetch_buy_listing_detail,
+    scrape_listings,
+    _scrape_single_region,
 )
 
 
@@ -164,6 +169,8 @@ def test_extract_detail_fields_full():
         "ware": {
             "mainarea": "18.5",
             "community_name": "VICTOR嘉醴",
+            "position_lat": "25.033964",
+            "position_lng": "121.543872",
         },
         "info": {
             "3": [
@@ -187,6 +194,8 @@ def test_extract_detail_fields_full():
     assert result["fitment"] == "高檔裝潢"
     assert result["shape_name"] == "電梯大樓"
     assert result["direction"] == "坐南朝北"
+    assert result["lat"] == pytest.approx(25.033964)
+    assert result["lng"] == pytest.approx(121.543872)
 
 
 def test_extract_detail_fields_empty():
@@ -194,6 +203,8 @@ def test_extract_detail_fields_empty():
     assert result.get("main_area") is None
     assert result.get("community_name") is None
     assert result.get("parking_desc") is None
+    assert result.get("lat") is None
+    assert result.get("lng") is None
 
 
 def test_extract_detail_fields_partial():
@@ -211,3 +222,196 @@ def test_extract_detail_fields_partial():
     assert result.get("parking_desc") is None  # empty string -> None
     assert result["public_ratio"] == "35%"
     assert result.get("fitment") is None
+
+
+def test_extract_detail_fields_with_coordinates():
+    data = {
+        "ware": {
+            "mainarea": "18.5",
+            "position_lat": "25.033964",
+            "position_lng": "121.543872",
+        },
+        "info": {},
+    }
+    result = _extract_detail_fields(data)
+    assert result["lat"] == pytest.approx(25.033964)
+    assert result["lng"] == pytest.approx(121.543872)
+
+
+def test_extract_detail_fields_lat_lng_fallback_keys():
+    data = {
+        "ware": {
+            "lat": "25.1",
+            "lng": "121.5",
+        },
+        "info": {},
+    }
+    result = _extract_detail_fields(data)
+    assert result["lat"] == pytest.approx(25.1)
+    assert result["lng"] == pytest.approx(121.5)
+
+
+def test_extract_detail_fields_location_object_fallback():
+    """When ware has no coords, fall back to location object."""
+    data = {
+        "ware": {"mainarea": "35.7"},
+        "info": {},
+        "location": {"lat": "25.0383780", "lng": "121.6237651"},
+    }
+    result = _extract_detail_fields(data)
+    assert result["lat"] == pytest.approx(25.038378)
+    assert result["lng"] == pytest.approx(121.6237651)
+
+
+# --- scrape_listings parallel ---
+
+def _multi_region_config(regions):
+    return Config(
+        search=SearchConfig(
+            regions=regions,
+            districts=["南港區"],
+            price_min=2000,
+            price_max=3000,
+            mode="buy",
+            min_ping=20,
+            max_pages=1,
+        ),
+        telegram=TelegramConfig(bot_token="test", chat_id="test"),
+        database_path="data/test.db",
+        scraper=ScraperConfig(delay_min=0, delay_max=0, timeout=10, max_retries=2, max_workers=4),
+    )
+
+
+def test_scrape_listings_multi_region_combined(monkeypatch):
+    """Multiple regions returns combined results."""
+    config = _multi_region_config([1, 3])
+
+    def fake_scrape(cfg, progress_cb=None):
+        rid = cfg.search.regions[0]
+        return [{"listing_id": f"{rid}-1"}, {"listing_id": f"{rid}-2"}]
+
+    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+        result = scrape_listings(config)
+
+    assert len(result) == 4
+    ids = {r["listing_id"] for r in result}
+    assert ids == {"1-1", "1-2", "3-1", "3-2"}
+
+
+def test_scrape_listings_single_region_direct():
+    """Single region skips thread pool, direct call."""
+    config = _multi_region_config([1])
+
+    def fake_scrape(cfg, progress_cb=None):
+        return [{"listing_id": "1-1"}]
+
+    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+        result = scrape_listings(config)
+
+    assert len(result) == 1
+    assert result[0]["listing_id"] == "1-1"
+
+
+def test_scrape_listings_one_region_failure():
+    """One region failure returns other regions' results."""
+    config = _multi_region_config([1, 3])
+
+    def fake_scrape(cfg, progress_cb=None):
+        rid = cfg.search.regions[0]
+        if rid == 3:
+            raise RuntimeError("network error")
+        return [{"listing_id": f"{rid}-1"}]
+
+    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+        result = scrape_listings(config)
+
+    assert len(result) == 1
+    assert result[0]["listing_id"] == "1-1"
+
+
+def test_scrape_listings_progress_callback_thread_safe():
+    """Progress callback invoked from parallel threads without error."""
+    config = _multi_region_config([1, 3])
+    messages = []
+
+    def fake_scrape(cfg, progress_cb=None):
+        rid = cfg.search.regions[0]
+        if progress_cb:
+            progress_cb(f"region {rid}")
+        return [{"listing_id": f"{rid}-1"}]
+
+    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+        result = scrape_listings(config, progress_cb=lambda m: messages.append(m))
+
+    assert len(result) == 2
+    assert len(messages) == 2
+    assert set(messages) == {"region 1", "region 3"}
+
+
+# --- fetch_buy_listing_detail status=0 top-level data ---
+
+def test_fetch_buy_listing_detail_status0_toplevel():
+    """status=0 response with ware/info/location at top level should succeed."""
+    import requests as _requests
+
+    mock_body = {
+        "status": 0,
+        "ware": {
+            "mainarea": "18.5",
+            "community_name": "測試社區",
+            "position_lat": "",
+            "position_lng": "",
+        },
+        "info": {
+            "3": [
+                {"name": "車位", "value": ""},
+                {"name": "公設比", "value": "35%"},
+            ],
+        },
+        "location": {"lat": "25.033964", "lng": "121.543872"},
+    }
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return mock_body
+
+    class FakeSession:
+        def get(self, *a, **kw):
+            return FakeResp()
+
+    result = fetch_buy_listing_detail(FakeSession(), {}, "12345")
+    assert result is not None
+    assert result["main_area"] == 18.5
+    assert result["community_name"] == "測試社區"
+    assert result["public_ratio"] == "35%"
+    assert result["lat"] == pytest.approx(25.033964)
+    assert result["lng"] == pytest.approx(121.543872)
+
+
+def test_fetch_buy_listing_detail_data_is_string():
+    """When body['data'] is a string, fall back to top-level ware."""
+    mock_body = {
+        "status": 0,
+        "data": "some string value",
+        "ware": {
+            "mainarea": "22.0",
+            "community_name": "字串測試",
+        },
+        "info": {},
+        "location": {"lat": "25.1", "lng": "121.5"},
+    }
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return mock_body
+
+    class FakeSession:
+        def get(self, *a, **kw):
+            return FakeResp()
+
+    result = fetch_buy_listing_detail(FakeSession(), {}, "99999")
+    assert result is not None
+    assert result["main_area"] == 22.0
+    assert result["lat"] == pytest.approx(25.1)

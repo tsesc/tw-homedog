@@ -80,7 +80,7 @@ def _enrich_matched_listings(config, storage, matched):
 
     logger.info("Enriching %d unenriched listings...", len(unenriched))
     session, headers = _get_buy_session_headers(config)
-    details = enrich_buy_listings(config, session, headers, unenriched)
+    details = enrich_buy_listings(config, session, headers, unenriched, storage=storage)
 
     for lid, detail in details.items():
         storage.update_listing_detail("591", lid, detail)

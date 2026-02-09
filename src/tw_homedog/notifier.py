@@ -176,6 +176,8 @@ async def send_notifications(config: Config, storage: Storage, listings: list[di
         )
 
     sent_count = 0
+    map_photo_sent = 0
+    map_fallback = 0
     bot = Bot(token=config.telegram.bot_token)
     provider = _map_provider(config)
 
@@ -195,8 +197,10 @@ async def send_notifications(config: Config, storage: Storage, listings: list[di
             if file_id:
                 provider.remember_file_id(thumb.cache_key, file_id)
                 success = True
+                map_photo_sent += 1
             else:
                 success = await _send_message(bot, config.telegram.chat_id, msg)
+                map_fallback += 1
         else:
             success = await _send_message(bot, config.telegram.chat_id, msg)
 
@@ -214,4 +218,9 @@ async def send_notifications(config: Config, storage: Storage, listings: list[di
             await asyncio.sleep(MESSAGE_DELAY)
 
     logger.info("Sent %d/%d notifications", sent_count, len(batch))
+    if provider:
+        logger.info(
+            "Map stats: %d photo sent, %d fallback to text, %d skipped",
+            map_photo_sent, map_fallback, len(batch) - map_photo_sent - map_fallback,
+        )
     return sent_count

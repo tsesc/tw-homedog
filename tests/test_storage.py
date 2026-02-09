@@ -83,6 +83,8 @@ def test_update_listing_detail(db):
         "community_name": "VICTOR嘉醴",
         "main_area": 18.5,
         "direction": "坐南朝北",
+        "lat": 25.033,
+        "lng": 121.543,
     }
     db.update_listing_detail("591", "12345678", detail)
     row = db.conn.execute("SELECT * FROM listings WHERE listing_id = '12345678'").fetchone()
@@ -94,6 +96,8 @@ def test_update_listing_detail(db):
     assert row["community_name"] == "VICTOR嘉醴"
     assert row["main_area"] == 18.5
     assert row["direction"] == "坐南朝北"
+    assert row["lat"] == 25.033
+    assert row["lng"] == 121.543
     assert row["is_enriched"] == 1
 
 

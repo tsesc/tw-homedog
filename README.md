@@ -50,7 +50,7 @@ TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy uv run python -m tw_homedog
 | 指令 | 說明 |
 |------|------|
 | `/start` | 首次設定引導 / 歡迎訊息 |
-| `/list` | 互動式瀏覽未讀物件（分頁、篩選、詳情、標記已讀） |
+| `/list` | 互動式瀏覽未讀物件（最新優先、分頁、篩選、詳情、標記已讀） |
 | `/favorites` | 查看收藏的物件 |
 | `/settings` | 修改搜尋條件（模式、地區、區域、價格、坪數、關鍵字、排程） |
 | `/status` | 查看當前設定、排程狀態、物件統計 |

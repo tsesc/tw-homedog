@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS listings (
     community_name TEXT,
     main_area REAL,
     direction TEXT,
+    lat REAL,
+    lng REAL,
     entity_fingerprint TEXT,
     is_enriched INTEGER DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -131,6 +133,8 @@ class Storage:
             "community_name": "TEXT",
             "main_area": "REAL",
             "direction": "TEXT",
+            "lat": "REAL",
+            "lng": "REAL",
             "entity_fingerprint": "TEXT",
             "is_enriched": "INTEGER DEFAULT 0",
         }
@@ -662,7 +666,8 @@ class Storage:
             """UPDATE listings SET
                 parking_desc = ?, public_ratio = ?, manage_price_desc = ?,
                 fitment = ?, shape_name = ?, community_name = ?,
-                main_area = ?, direction = ?, is_enriched = 1
+                main_area = ?, direction = ?, lat = ?, lng = ?,
+                is_enriched = 1
                WHERE source = ? AND listing_id = ?""",
             (
                 detail.get("parking_desc"),
@@ -673,6 +678,8 @@ class Storage:
                 detail.get("community_name"),
                 detail.get("main_area"),
                 detail.get("direction"),
+                detail.get("lat"),
+                detail.get("lng"),
                 source,
                 listing_id,
             ),
@@ -714,7 +721,8 @@ class Storage:
             """SELECT l.* FROM listings l
                LEFT JOIN listings_read r
                  ON l.source = r.source AND l.listing_id = r.listing_id
-               WHERE r.source IS NULL OR l.raw_hash != r.raw_hash"""
+               WHERE r.source IS NULL OR l.raw_hash != r.raw_hash
+               ORDER BY l.id DESC"""
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -725,7 +733,8 @@ class Storage:
                                 WHEN l.raw_hash = r.raw_hash THEN 1 ELSE 0 END AS is_read
                FROM listings l
                LEFT JOIN listings_read r
-                 ON l.source = r.source AND l.listing_id = r.listing_id"""
+                 ON l.source = r.source AND l.listing_id = r.listing_id
+               ORDER BY l.id DESC"""
         ).fetchall()
         result = []
         for row in rows:

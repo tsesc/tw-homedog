@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tw_homedog.map_preview import MapConfig, MapThumbnailProvider
+from tw_homedog.map_preview import MapConfig, MapThumbnailProvider, geocode_address
 
 
 class _Resp:
@@ -70,3 +70,60 @@ def test_remember_file_id_persists(tmp_path):
 
     saved = json.loads((Path(tmp_path) / "file_ids.json").read_text())
     assert saved["abc"] == "file123"
+
+
+# --- geocode_address standalone function ---
+
+def test_geocode_address_success(monkeypatch):
+    def fake_get(url, *args, **kwargs):
+        return _Resp(json_data={
+            "results": [{"geometry": {"location": {"lat": 25.033, "lng": 121.543}}}],
+        })
+
+    monkeypatch.setattr("tw_homedog.map_preview.requests.get", fake_get)
+
+    lat, lng = geocode_address("台北市大安區", api_key="test-key")
+    assert lat == pytest.approx(25.033)
+    assert lng == pytest.approx(121.543)
+
+
+def test_geocode_address_no_results(monkeypatch):
+    def fake_get(url, *args, **kwargs):
+        return _Resp(json_data={"results": []})
+
+    monkeypatch.setattr("tw_homedog.map_preview.requests.get", fake_get)
+
+    lat, lng = geocode_address("nowhere", api_key="test-key")
+    assert lat is None
+    assert lng is None
+
+
+def test_geocode_address_with_cache(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_get(url, *args, **kwargs):
+        calls["count"] += 1
+        return _Resp(json_data={
+            "results": [{"geometry": {"location": {"lat": 25.0, "lng": 121.5}}}],
+        })
+
+    monkeypatch.setattr("tw_homedog.map_preview.requests.get", fake_get)
+
+    cache: dict = {}
+    lat1, lng1 = geocode_address("台北市", api_key="k", cache=cache)
+    lat2, lng2 = geocode_address("台北市", api_key="k", cache=cache)
+
+    assert lat1 == lat2 == pytest.approx(25.0)
+    assert lng1 == lng2 == pytest.approx(121.5)
+    assert calls["count"] == 1  # second call used cache
+
+
+def test_geocode_address_api_error(monkeypatch):
+    def fake_get(url, *args, **kwargs):
+        return _Resp(status_code=500)
+
+    monkeypatch.setattr("tw_homedog.map_preview.requests.get", fake_get)
+
+    lat, lng = geocode_address("台北市", api_key="k")
+    assert lat is None
+    assert lng is None
