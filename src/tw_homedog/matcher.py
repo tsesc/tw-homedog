@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime
 
-from tw_homedog.config import Config
+from tw_homedog.db_config import Config
 from tw_homedog.storage import Storage
 
 logger = logging.getLogger(__name__)

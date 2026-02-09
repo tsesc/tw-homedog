@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
+from tw_homedog.db_config import Config, SearchConfig, TelegramConfig, ScraperConfig
 from tw_homedog.regions import (
     BUY_SECTION_CODES,
     RENT_SECTION_CODES,

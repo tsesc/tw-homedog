@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
+from tw_homedog.db_config import Config, SearchConfig, TelegramConfig, ScraperConfig
 from tw_homedog.normalizer import normalize_591_listing
 from tw_homedog.matcher import find_matching_listings
 from tw_homedog.notifier import send_notifications

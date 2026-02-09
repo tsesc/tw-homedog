@@ -1,20 +1,82 @@
-"""Database-backed configuration management."""
+"""Database-backed configuration management and config dataclasses."""
 
 import json
 import logging
 import sqlite3
-from pathlib import Path
+from dataclasses import dataclass, field
 
-import yaml
-
-from tw_homedog.config import Config, DedupConfig, ScraperConfig, SearchConfig, TelegramConfig
 from tw_homedog.map_preview import MapConfig
-from tw_homedog.regions import EN_TO_ZH
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Config dataclasses
+# =============================================================================
+
+
+@dataclass
+class SearchConfig:
+    regions: list[int]
+    districts: list[str]
+    price_min: int | float
+    price_max: int | float
+    mode: str = "buy"  # "buy" or "rent"
+    min_ping: float | None = None
+    max_ping: float | None = None
+    room_counts: list[int] = field(default_factory=list)
+    bathroom_counts: list[int] = field(default_factory=list)
+    year_built_min: int | None = None
+    year_built_max: int | None = None
+    keywords_include: list[str] = field(default_factory=list)
+    keywords_exclude: list[str] = field(default_factory=list)
+    max_pages: int = 3
+
+
+@dataclass
+class TelegramConfig:
+    bot_token: str
+    chat_id: str
+
+
+@dataclass
+class ScraperConfig:
+    delay_min: int = 2
+    delay_max: int = 5
+    timeout: int = 30
+    max_retries: int = 3
+    max_workers: int = 4
+
+
+@dataclass
+class DedupConfig:
+    enabled: bool = True
+    threshold: float = 0.82
+    price_tolerance: float = 0.05
+    size_tolerance: float = 0.08
+    cleanup_batch_size: int = 200
+
+
+@dataclass
+class Config:
+    search: SearchConfig
+    telegram: TelegramConfig
+    database_path: str
+    scraper: ScraperConfig
+    maps: MapConfig = field(
+        default_factory=lambda: MapConfig(
+            enabled=False,
+            api_key=None,
+        )
+    )
+    dedup: DedupConfig = field(default_factory=DedupConfig)
+
+
+# =============================================================================
+# DB-backed config store
+# =============================================================================
+
 REQUIRED_KEYS = [
-    # Accept either search.region or search.regions for backward compatibility
     "search.districts",
     "search.price_min",
     "search.price_max",
@@ -112,7 +174,6 @@ class DbConfig:
 
     def has_config(self) -> bool:
         """Check if any required config keys exist (i.e. setup has been done)."""
-        # Also check for region/regions (backward compat)
         extended_keys = REQUIRED_KEYS + ["search.region", "search.regions"]
         row = self.conn.execute(
             "SELECT COUNT(*) FROM bot_config WHERE key IN ({})".format(
@@ -148,18 +209,14 @@ class DbConfig:
             raise ValueError("Config must specify either 'search.region' or 'search.regions'")
 
         if regions_raw is not None:
-            # New format: regions as list
             if not isinstance(regions_raw, list):
                 regions = [regions_raw]
             else:
                 regions = regions_raw
         else:
-            # Old format: single region (backward compat)
             regions = [region_raw]
 
-        # Convert English district names to Chinese for backward compatibility
-        raw_districts = _get("search.districts", [])
-        districts = [EN_TO_ZH.get(d, d) for d in raw_districts]
+        districts = _get("search.districts", [])
 
         def _validate_filters():
             errors: list[str] = []
@@ -254,82 +311,3 @@ class DbConfig:
                 ),
             ),
         )
-
-    def migrate_from_yaml(self, path: str | Path) -> int:
-        """Import config from a YAML file into bot_config table. Returns number of keys imported."""
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
-
-        with open(path) as f:
-            raw = yaml.safe_load(f)
-
-        if not isinstance(raw, dict):
-            raise ValueError(f"Invalid config format: expected mapping, got {type(raw).__name__}")
-
-        items = {}
-        search = raw.get("search", {})
-        telegram = raw.get("telegram", {})
-        scraper = raw.get("scraper", {})
-        price = search.get("price", {})
-        size = search.get("size", {})
-        keywords = search.get("keywords", {})
-
-        if "region" in search:
-            items["search.region"] = search["region"]
-        if "districts" in search:
-            items["search.districts"] = search["districts"]
-        if "room_counts" in search:
-            items["search.room_counts"] = search["room_counts"]
-        if "bathroom_counts" in search:
-            items["search.bathroom_counts"] = search["bathroom_counts"]
-        if "min" in price:
-            items["search.price_min"] = price["min"]
-        if "max" in price:
-            items["search.price_max"] = price["max"]
-        if "mode" in search:
-            items["search.mode"] = search["mode"]
-        if "min_ping" in size:
-            items["search.min_ping"] = size["min_ping"]
-        if "max_ping" in size:
-            items["search.max_ping"] = size["max_ping"]
-        if "year_built" in search:
-            year_built = search.get("year_built", {})
-            if "min" in year_built:
-                items["search.year_built_min"] = year_built["min"]
-            if "max" in year_built:
-                items["search.year_built_max"] = year_built["max"]
-        if "include" in keywords:
-            items["search.keywords_include"] = keywords["include"]
-        if "exclude" in keywords:
-            items["search.keywords_exclude"] = keywords["exclude"]
-        if "max_pages" in search:
-            items["search.max_pages"] = search["max_pages"]
-
-        if "bot_token" in telegram:
-            items["telegram.bot_token"] = str(telegram["bot_token"])
-        if "chat_id" in telegram:
-            items["telegram.chat_id"] = str(telegram["chat_id"])
-
-        db_path = raw.get("database", {}).get("path")
-        if db_path:
-            items["database.path"] = db_path
-
-        for key in ("delay_min", "delay_max", "timeout", "max_retries"):
-            if key in scraper:
-                items[f"scraper.{key}"] = scraper[key]
-
-        dedup = raw.get("dedup", {})
-        for key in (
-            "enabled",
-            "threshold",
-            "price_tolerance",
-            "size_tolerance",
-            "cleanup_batch_size",
-        ):
-            if key in dedup:
-                items[f"dedup.{key}"] = dedup[key]
-
-        self.set_many(items)
-        logger.info("Migrated %d config keys from %s", len(items), path)
-        return len(items)

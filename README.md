@@ -87,26 +87,9 @@ TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy uv run python -m tw_homedog
 
 ## Configuration
 
-### Bot Mode
-
 所有設定透過 Telegram Bot inline keyboard 管理，儲存在 SQLite `bot_config` 表中。
 
 首次啟動時傳送 `/start` 開始設定引導，之後隨時可用 `/settings` 修改任何參數。
-
-### CLI Mode (Legacy)
-
-仍可使用傳統 YAML 配置 + 一次性執行模式：
-
-```bash
-cp config.example.yaml config.yaml
-# Edit config.yaml
-
-uv run python -m tw_homedog cli run        # Full pipeline
-uv run python -m tw_homedog cli scrape     # Scrape only
-uv run python -m tw_homedog cli notify     # Notify only
-```
-
-設定範例請參考 `config.examples/` 目錄。
 
 ## Listing Deduplication
 
@@ -114,31 +97,14 @@ uv run python -m tw_homedog cli notify     # Notify only
 
 ### Dedup Tuning Knobs
 
-可在 `config.yaml` 的 `dedup` 區塊或 Bot 設定中調整：
+透過 Bot `/settings` 調整去重參數：
 
-```yaml
-dedup:
-  enabled: true
-  threshold: 0.82
-  price_tolerance: 0.05
-  size_tolerance: 0.08
-  cleanup_batch_size: 200
-```
-
-- `threshold`: 越高越保守（降低誤刪，可能漏掉部分重複）。
-- `price_tolerance` / `size_tolerance`: 允許同屋在不同刊登間的價格/坪數微幅差異。
+- `threshold` (預設 0.82): 越高越保守（降低誤刪，可能漏掉部分重複）
+- `price_tolerance` (預設 0.05) / `size_tolerance` (預設 0.08): 允許同屋在不同刊登間的價格/坪數微幅差異
 
 ### Historical Cleanup
 
-```bash
-# Dry-run（不改資料）
-uv run python -m tw_homedog cli dedup-cleanup
-
-# 套用清理
-uv run python -m tw_homedog cli dedup-cleanup --apply
-
-# 或在 Bot 中使用 /dedupall
-```
+在 Bot 中使用 `/dedupall` 以 batch 方式執行全庫去重。
 
 ## Telegram 縮圖（Google Maps）
 
@@ -182,16 +148,6 @@ PY
 ```
 
 重啟 bot 後，新通知會附上地圖縮圖，失敗時自動降級為純文字地址。
-
-### CLI / config.yaml
-
-```yaml
-maps:
-  enabled: true
-  api_key: YOUR_GOOGLE_MAPS_API_KEY
-```
-
-完整選項請參考 `config.example.yaml`。
 
 ## Docker
 

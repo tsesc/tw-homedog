@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
+from tw_homedog.db_config import Config, SearchConfig, TelegramConfig, ScraperConfig
 from tw_homedog.map_preview import MapConfig
 from tw_homedog.notifier import format_listing_message, send_notifications, validate_bot_token
 from tw_homedog.storage import Storage

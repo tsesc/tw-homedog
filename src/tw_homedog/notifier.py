@@ -8,7 +8,7 @@ from typing import Optional
 from telegram import Bot
 from telegram.error import TelegramError
 
-from tw_homedog.config import Config
+from tw_homedog.db_config import Config
 from tw_homedog.map_preview import MapConfig, MapThumbnailProvider, MapThumbnail
 from tw_homedog.storage import Storage
 

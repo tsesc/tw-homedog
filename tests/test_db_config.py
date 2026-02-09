@@ -108,34 +108,6 @@ def test_build_config_with_chinese_districts(db_config):
     assert config.database_path == "data/homedog.db"  # default
 
 
-def test_build_config_english_districts_converted(db_config):
-    """English district names in DB should be converted to Chinese via EN_TO_ZH."""
-    db_config.set_many({
-        "search.regions": [1],
-        "search.districts": ["Daan", "Xinyi", "Neihu"],
-        "search.price_min": 1000,
-        "search.price_max": 3000,
-        "telegram.bot_token": "123:ABC",
-        "telegram.chat_id": "456",
-    })
-    config = db_config.build_config()
-    assert config.search.districts == ["大安區", "信義區", "內湖區"]
-
-
-def test_build_config_mixed_districts(db_config):
-    """Mix of English and Chinese district names — English converted, Chinese kept."""
-    db_config.set_many({
-        "search.regions": [1],
-        "search.districts": ["Daan", "內湖區", "Wenshan"],
-        "search.price_min": 1000,
-        "search.price_max": 3000,
-        "telegram.bot_token": "123:ABC",
-        "telegram.chat_id": "456",
-    })
-    config = db_config.build_config()
-    assert config.search.districts == ["大安區", "內湖區", "文山區"]
-
-
 def test_build_config_with_all_fields(db_config):
     db_config.set_many({
         "search.regions": [1],
@@ -180,46 +152,6 @@ def test_build_config_backward_compat_old_region(db_config):
     assert config.search.regions == [1]
 
 
-def test_migrate_from_yaml(db_config, tmp_path):
-    yaml_content = """
-search:
-  region: 1
-  mode: buy
-  districts:
-    - Daan
-    - Xinyi
-  price:
-    min: 1000
-    max: 3000
-  size:
-    min_ping: 20
-  keywords:
-    include:
-      - 電梯
-    exclude:
-      - 頂加
-  max_pages: 5
-telegram:
-  bot_token: "123:ABC"
-  chat_id: "456"
-database:
-  path: "data/my.db"
-scraper:
-  delay_min: 3
-  delay_max: 8
-"""
-    yaml_file = tmp_path / "config.yaml"
-    yaml_file.write_text(yaml_content)
-
-    count = db_config.migrate_from_yaml(str(yaml_file))
-    assert count > 0
-
-    config = db_config.build_config()
-    assert config.search.regions == [1]
-    # English names migrated from YAML are converted to Chinese in build_config
-    assert config.search.districts == ["大安區", "信義區"]
-
-
 def test_build_config_validates_size_range(db_config):
     db_config.set_many({
         "search.regions": [1],
@@ -250,13 +182,3 @@ def test_build_config_validates_year_range(db_config):
         db_config.build_config()
 
 
-def test_migrate_from_yaml_file_not_found(db_config):
-    with pytest.raises(FileNotFoundError):
-        db_config.migrate_from_yaml("/nonexistent/config.yaml")
-
-
-def test_migrate_from_yaml_invalid_format(db_config, tmp_path):
-    yaml_file = tmp_path / "bad.yaml"
-    yaml_file.write_text("just a string")
-    with pytest.raises(ValueError, match="Invalid config format"):
-        db_config.migrate_from_yaml(str(yaml_file))

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 import requests
 from bs4 import BeautifulSoup
 
-from tw_homedog.config import Config, SearchConfig
+from tw_homedog.db_config import Config, SearchConfig
 from tw_homedog.regions import (
     BUY_SECTION_CODES,
     RENT_SECTION_CODES,

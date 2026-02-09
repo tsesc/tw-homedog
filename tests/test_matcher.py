@@ -2,7 +2,7 @@
 
 import pytest
 
-from tw_homedog.config import Config, SearchConfig, TelegramConfig, ScraperConfig
+from tw_homedog.db_config import Config, SearchConfig, TelegramConfig, ScraperConfig
 from tw_homedog.matcher import (
     match_price,
     match_district,

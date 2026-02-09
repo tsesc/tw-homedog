@@ -11,13 +11,8 @@ uv run pytest -v                       # Run all tests
 uv run pytest tests/test_scraper.py    # Run single test file
 uv run pytest -k "test_price"          # Run tests matching pattern
 
-# Bot mode (default) — long-running Telegram Bot with interactive config
+# Bot mode — long-running Telegram Bot with interactive config
 TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy uv run python -m tw_homedog
-
-# CLI mode — one-shot pipeline execution (legacy)
-uv run python -m tw_homedog cli run        # Full pipeline: scrape → match → notify
-uv run python -m tw_homedog cli scrape     # Scrape + store only
-uv run python -m tw_homedog cli notify     # Match + notify from existing DB
 
 # Docker
 docker compose up -d                   # Start Bot mode with Docker
@@ -61,17 +56,14 @@ docker compose logs -f                 # View logs
 
 ## Architecture
 
-兩種運作模式：
-- **Bot mode** (預設)：長駐 Telegram Bot，透過 inline keyboard 設定，JobQueue 排程自動執行
-- **CLI mode** (`cli` 子指令)：一次性執行 pipeline，使用 YAML 設定檔
+長駐 Telegram Bot，透過 inline keyboard 設定，JobQueue 排程自動執行。
 
 ### 主要模組
 
 - **bot.py** — Telegram Bot Application，ConversationHandler 處理 setup flow，InlineKeyboard 處理 settings，JobQueue 排程
-- **db_config.py** — SQLite key-value 設定存儲，`build_config()` 從 DB 組建 Config dataclass。支援 `search.region`（舊格式）和 `search.regions`（新格式 list）的向後相容
+- **db_config.py** — Config dataclasses（`Config`, `SearchConfig`, `TelegramConfig`, `ScraperConfig`, `DedupConfig`）和 SQLite key-value 設定存儲（`DbConfig`），`build_config()` 從 DB 組建 Config dataclass。支援 `search.region`（舊格式）和 `search.regions`（新格式 list）的向後相容
 - **regions.py** — 全台 22 縣市的 region code 和 district section code。買賣/租房的 section code 完全不同（如內湖區：buy=10, rent=5）。Section codes 須與 591 BFF API 實際回傳值一致
 - **scraper.py** — 591 爬蟲。`scrape_listings()` 為統一入口，依 mode 分派到 `scrape_buy_listings()` 或 `scrape_rent_listings()`
-- **config.py** — YAML 設定載入與驗證（CLI mode）。`SearchConfig.regions: list[int]` 支援多地區
 - **dedup.py** — 物件去重引擎。使用 `entity_fingerprint`（地址+社區正規化後的 hash）識別同一實體，`score_duplicate()` 計算兩物件相似度（標題、地址、價格、坪數加權），超過門檻視為重複
 - **dedup_cleanup.py** — 歷史去重清理。掃描 DB 中 fingerprint 相同的群組，規劃合併（保留 canonical listing，遷移關聯表記錄），支援 dry-run 和 batch apply
 - **map_preview.py** — Google Maps Static API 地圖縮圖產生與快取。支援 Geocoding API 地址→座標轉換，檔案級快取（可設 TTL），失敗時自動降級
@@ -102,7 +94,7 @@ docker compose logs -f                 # View logs
 - `notifier.py` 在 sync code 中使用 `asyncio.run()` 呼叫 Telegram async API
 - `python-telegram-bot[job-queue]` extra 是 JobQueue/APScheduler 所需
 
-## Environment Variables (Bot mode)
+## Environment Variables
 
 - `TELEGRAM_BOT_TOKEN` (required) — Bot token from @BotFather
 - `TELEGRAM_CHAT_ID` (required) — Authorized chat ID
@@ -111,11 +103,10 @@ docker compose logs -f                 # View logs
 
 ## Config
 
-**Bot mode**: Config 存在 SQLite `bot_config` 表，透過 Telegram inline keyboard 管理。
-**CLI mode**: YAML config at `config.yaml` (copy from `config.example.yaml`)。
+Config 存在 SQLite `bot_config` 表，透過 Telegram inline keyboard 管理。
 
-Config 支援中文優先格式：`regions: ["台北市", "新北市"]`、`districts: ["內湖區", "南港區"]`。英文名（`region: 1`、`districts: ["Neihu"]`）仍可使用。全台 22 縣市支援買房模式；租房僅台北市。
+Config 支援中文格式：`regions: ["台北市", "新北市"]`、`districts: ["內湖區", "南港區"]`。全台 22 縣市支援買房模式；租房僅台北市。
 
 ## Testing
 
-Tests use `tmp_path` for isolated SQLite DBs. External APIs (Telegram, 591) are mocked. Test helpers like `_listing(**overrides)` create test data with sensible defaults. 目前共 203 個測試。
+Tests use `tmp_path` for isolated SQLite DBs. External APIs (Telegram, 591) are mocked. Test helpers like `_listing(**overrides)` create test data with sensible defaults. 目前共 205 個測試。
