@@ -1,7 +1,7 @@
 REMOTE_HOST := home.lab
 REMOTE_PATH := /home/jack/projects/personal/tw-homedog
 
-.PHONY: sync deploy down up
+.PHONY: sync deploy down up sync-db
 
 sync:
 	rsync -avz --delete \
@@ -29,3 +29,7 @@ up:
 	ssh $(REMOTE_HOST) "cd $(REMOTE_PATH) && docker compose up --build -d"
 
 deploy: sync down up
+
+sync-db:
+	@mkdir -p data
+	rsync -avz $(REMOTE_HOST):$(REMOTE_PATH)/data/homedog.db data/homedog.db
