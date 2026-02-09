@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from time import time
 from typing import Optional
@@ -35,6 +36,7 @@ class MapConfig:
     cache_ttl_seconds: int = 86400
     cache_dir: str = "data/map_cache"
     style: str | None = None
+    monthly_limit: int = 10000
 
 
 def geocode_address(
@@ -86,6 +88,7 @@ class MapThumbnailProvider:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._file_id_index_path = self.cache_dir / "file_ids.json"
         self._geocode_cache_path = self.cache_dir / "geocode_cache.json"
+        self._monthly_usage_path = self.cache_dir / "monthly_usage.json"
         self._file_id_index = self._load_file_id_index()
         self._geocode_cache = self._load_geocode_cache()
 
@@ -117,6 +120,9 @@ class MapThumbnailProvider:
             logger.debug("Map cache hit for %s", cache_key[:12])
             return MapThumbnail(cache_key=cache_key, file_path=file_path, file_id=file_id)
 
+        if not self._check_monthly_limit():
+            return MapThumbnail(cache_key=cache_key, file_path=None, file_id=file_id) if file_id else None
+
         logger.debug("Map cache miss for %s; fetching from API", cache_key[:12])
         url = self._build_request_url(address=address, lat=lat, lng=lng)
         try:
@@ -129,6 +135,7 @@ class MapThumbnailProvider:
                 return None
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_bytes(resp.content)
+            self._increment_monthly_usage()
             logger.debug("Map fetched and cached: %s", cache_key[:12])
             return MapThumbnail(cache_key=cache_key, file_path=file_path, file_id=file_id)
         except requests.RequestException as exc:
@@ -155,6 +162,9 @@ class MapThumbnailProvider:
         if cached:
             return cached.get("lat"), cached.get("lng")
 
+        if not self._check_monthly_limit():
+            return None, None
+
         lat, lng = geocode_address(
             address,
             api_key=self.config.api_key,
@@ -163,6 +173,7 @@ class MapThumbnailProvider:
             timeout=self.config.timeout,
         )
         if lat is not None and lng is not None:
+            self._increment_monthly_usage()
             self._geocode_cache[address] = {"lat": lat, "lng": lng, "ts": time()}
             self._persist_geocode_cache()
         return lat, lng
@@ -225,6 +236,61 @@ class MapThumbnailProvider:
                 logger.warning("Failed to read geocode cache; starting empty")
                 return {}
         return {}
+
+    # ------------------------------------------------------------------
+    # Monthly API usage tracking
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _current_month() -> str:
+        return date.today().strftime("%Y-%m")
+
+    def _load_monthly_usage(self) -> dict:
+        if self._monthly_usage_path.exists():
+            try:
+                return json.loads(self._monthly_usage_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                return {}
+        return {}
+
+    def _save_monthly_usage(self, data: dict) -> None:
+        try:
+            tmp_path = self._monthly_usage_path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(data, ensure_ascii=False))
+            tmp_path.replace(self._monthly_usage_path)
+        except OSError as exc:
+            logger.warning("Failed to persist monthly usage: %s", exc)
+
+    def _check_monthly_limit(self) -> bool:
+        """Return True if under monthly limit, False if exhausted."""
+        if self.config.monthly_limit <= 0:
+            return True  # 0 or negative = unlimited
+        usage = self._load_monthly_usage()
+        month = self._current_month()
+        if usage.get("month") != month:
+            return True  # new month, counter reset
+        count = usage.get("count", 0)
+        if count >= self.config.monthly_limit:
+            logger.warning(
+                "Maps API monthly limit reached (%d/%d); skipping",
+                count, self.config.monthly_limit,
+            )
+            return False
+        return True
+
+    def _increment_monthly_usage(self) -> None:
+        usage = self._load_monthly_usage()
+        month = self._current_month()
+        if usage.get("month") != month:
+            usage = {"month": month, "count": 0}
+        usage["count"] = usage.get("count", 0) + 1
+        self._save_monthly_usage(usage)
+
+    def get_monthly_usage(self) -> tuple[int, int]:
+        """Return (used_this_month, monthly_limit) for status display."""
+        usage = self._load_monthly_usage()
+        month = self._current_month()
+        count = usage.get("count", 0) if usage.get("month") == month else 0
+        return count, self.config.monthly_limit
 
     def _persist_geocode_cache(self) -> None:
         try:

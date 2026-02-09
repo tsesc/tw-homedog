@@ -64,7 +64,8 @@ logger = logging.getLogger(__name__)
     SETTINGS_PAGES_INPUT,
     SETTINGS_REGION_INPUT,
     SETTINGS_MAPS_APIKEY_INPUT,
-) = range(18)
+    SETTINGS_MAPS_DAILY_LIMIT_INPUT,
+) = range(19)
 
 # Reverse lookup: region_id → Chinese name
 _REGION_ID_TO_NAME: dict[int, str] = {v: k for k, v in REGION_CODES.items()}
@@ -890,8 +891,17 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     elif data == "settings:maps":
         enabled = db_config.get("maps.enabled", False)
         has_key = bool(db_config.get("maps.api_key"))
+        monthly_limit = db_config.get("maps.monthly_limit", DEFAULTS["maps.monthly_limit"])
         status = "已開啟" if enabled else "已關閉"
         key_status = "已設定" if has_key else "未設定"
+        # Show this month's usage if provider available
+        usage_line = ""
+        if enabled and has_key:
+            provider = _get_map_provider(db_config)
+            if provider:
+                used, limit = provider.get_monthly_usage()
+                limit_label = "無限制" if limit <= 0 else str(limit)
+                usage_line = f"\n本月用量：{used}/{limit_label}"
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -902,9 +912,12 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             [
                 InlineKeyboardButton("🔑 設定 API Key", callback_data="set_maps:apikey"),
             ],
+            [
+                InlineKeyboardButton(f"📊 每月上限：{monthly_limit}", callback_data="set_maps:monthly_limit"),
+            ],
         ]
         await query.edit_message_text(
-            f"地圖縮圖設定\n狀態：{status}\nAPI Key：{key_status}",
+            f"地圖縮圖設定\n狀態：{status}\nAPI Key：{key_status}\n每月 API 上限：{monthly_limit}{usage_line}",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SETTINGS_MENU
@@ -1326,6 +1339,7 @@ async def set_maps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         enabled = not db_config.get("maps.enabled", False)
         db_config.set("maps.enabled", enabled)
         has_key = bool(db_config.get("maps.api_key"))
+        monthly_limit = db_config.get("maps.monthly_limit", DEFAULTS["maps.monthly_limit"])
         status = "已開啟" if enabled else "已關閉"
         key_status = "已設定" if has_key else "未設定"
         keyboard = [
@@ -1338,9 +1352,12 @@ async def set_maps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             [
                 InlineKeyboardButton("🔑 設定 API Key", callback_data="set_maps:apikey"),
             ],
+            [
+                InlineKeyboardButton(f"📊 每月上限：{monthly_limit}", callback_data="set_maps:monthly_limit"),
+            ],
         ]
         await query.edit_message_text(
-            f"地圖縮圖設定\n狀態：{status}\nAPI Key：{key_status}",
+            f"地圖縮圖設定\n狀態：{status}\nAPI Key：{key_status}\n每月 API 上限：{monthly_limit}",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SETTINGS_MENU
@@ -1348,6 +1365,14 @@ async def set_maps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     elif data == "set_maps:apikey":
         await query.edit_message_text("請輸入 Google Maps API Key：")
         return SETTINGS_MAPS_APIKEY_INPUT
+
+    elif data == "set_maps:monthly_limit":
+        monthly_limit = db_config.get("maps.monthly_limit", DEFAULTS["maps.monthly_limit"])
+        await query.edit_message_text(
+            f"當前每月 API 上限：{monthly_limit}\n"
+            "請輸入新的每月上限（0 = 無限制）："
+        )
+        return SETTINGS_MAPS_DAILY_LIMIT_INPUT
 
     return SETTINGS_MENU
 
@@ -1363,6 +1388,25 @@ async def settings_maps_apikey_handler(update: Update, context: ContextTypes.DEF
     db_config.set("maps.api_key", text)
     summary = _config_summary(db_config)
     await update.message.reply_text(f"已更新 Google Maps API Key\n\n{summary}")
+    return ConversationHandler.END
+
+
+async def settings_maps_monthly_limit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle maps monthly limit text input."""
+    text = update.message.text.strip()
+    try:
+        limit = int(text)
+        if limit < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("請輸入 0 或正整數（0 = 無限制）：")
+        return SETTINGS_MAPS_DAILY_LIMIT_INPUT
+
+    db_config: DbConfig = context.bot_data["db_config"]
+    db_config.set("maps.monthly_limit", limit)
+    label = "無限制" if limit == 0 else str(limit)
+    summary = _config_summary(db_config)
+    await update.message.reply_text(f"已更新每月 API 上限：{label}\n\n{summary}")
     return ConversationHandler.END
 
 
@@ -1917,6 +1961,7 @@ def _get_map_provider(db_config: DbConfig) -> MapThumbnailProvider | None:
         cache_ttl_seconds=db_config.get("maps.cache_ttl_seconds", DEFAULTS["maps.cache_ttl_seconds"]),
         cache_dir=db_config.get("maps.cache_dir", DEFAULTS["maps.cache_dir"]),
         style=db_config.get("maps.style", DEFAULTS["maps.style"]),
+        monthly_limit=db_config.get("maps.monthly_limit", DEFAULTS["maps.monthly_limit"]),
     )
     return MapThumbnailProvider(cfg)
 
@@ -2349,7 +2394,13 @@ def _config_summary(db_config: DbConfig) -> str:
     maps_enabled = db_config.get("maps.enabled", False)
     maps_has_key = bool(db_config.get("maps.api_key"))
     if maps_enabled:
-        lines.append(f"地圖：{'已開啟' if maps_has_key else '已開啟（缺 API Key）'}")
+        map_status = "已開啟" if maps_has_key else "已開啟（缺 API Key）"
+        provider = _get_map_provider(db_config)
+        if provider:
+            used, limit = provider.get_monthly_usage()
+            limit_label = "無限制" if limit <= 0 else str(limit)
+            map_status += f"（本月 {used}/{limit_label}）"
+        lines.append(f"地圖：{map_status}")
     else:
         lines.append("地圖：已關閉")
     return "\n".join(lines)
@@ -2567,6 +2618,9 @@ def create_application(
             ],
             SETTINGS_MAPS_APIKEY_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_maps_apikey_handler),
+            ],
+            SETTINGS_MAPS_DAILY_LIMIT_INPUT: [
+                MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_maps_monthly_limit_handler),
             ],
             CONFIG_IMPORT_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, config_import_handler),

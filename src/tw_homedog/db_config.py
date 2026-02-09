@@ -51,6 +51,7 @@ DEFAULTS = {
     "maps.cache_ttl_seconds": 86400,
     "maps.cache_dir": "data/map_cache",
     "maps.style": None,
+    "maps.monthly_limit": 10000,
     "dedup.enabled": True,
     "dedup.threshold": 0.82,
     "dedup.price_tolerance": 0.05,
@@ -239,6 +240,7 @@ class DbConfig:
                 cache_ttl_seconds=_get("maps.cache_ttl_seconds", DEFAULTS["maps.cache_ttl_seconds"]),
                 cache_dir=_get("maps.cache_dir", DEFAULTS["maps.cache_dir"]),
                 style=_get("maps.style", DEFAULTS["maps.style"]),
+                monthly_limit=_get("maps.monthly_limit", DEFAULTS["maps.monthly_limit"]),
             ),
             dedup=DedupConfig(
                 enabled=_get("dedup.enabled", DEFAULTS["dedup.enabled"]),
