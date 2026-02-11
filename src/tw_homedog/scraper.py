@@ -5,9 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import re
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -628,42 +626,21 @@ def _scrape_single_region(config: Config, region_id: int, progress_cb=None) -> l
 def scrape_listings(config: Config, progress_cb=None) -> list[dict]:
     """Scrape listings based on config mode (rent or buy).
 
-    Uses ThreadPoolExecutor for parallel scraping when multiple regions
-    are configured. Single region is scraped directly without thread pool.
+    Iterates over regions sequentially to avoid Playwright threading issues.
     """
     regions = config.search.regions
+    if not regions:
+        regions = [1]
 
-    # Single region: direct call, no thread pool overhead
-    if len(regions) <= 1:
-        region_id = regions[0] if regions else 1
-        return _scrape_single_region(config, region_id, progress_cb=progress_cb)
-
-    # Multiple regions: parallel scraping
-    lock = threading.Lock()
-
-    def safe_progress_cb(msg):
-        if progress_cb:
-            with lock:
-                progress_cb(msg)
-
-    max_workers = min(len(regions), getattr(config.scraper, 'max_workers', 4))
     all_listings = []
+    for i, region_id in enumerate(regions):
+        logger.info("Scraping region %d (%d/%d)", region_id, i + 1, len(regions))
+        try:
+            listings = _scrape_single_region(config, region_id, progress_cb=progress_cb)
+            all_listings.extend(listings)
+            logger.info("Region %d: got %d listings", region_id, len(listings))
+        except Exception:
+            logger.exception("Region %d scrape failed", region_id)
 
-    logger.info("Starting parallel scrape for %d regions (max_workers=%d)", len(regions), max_workers)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_scrape_single_region, config, rid, safe_progress_cb): rid
-            for rid in regions
-        }
-        for future in as_completed(futures):
-            rid = futures[future]
-            try:
-                listings = future.result()
-                all_listings.extend(listings)
-                logger.info("Region %d: got %d listings", rid, len(listings))
-            except Exception:
-                logger.exception("Region %d scrape failed", rid)
-
-    logger.info("Parallel scrape complete: %d total listings from %d regions", len(all_listings), len(regions))
+    logger.info("Sequential scrape complete: %d total listings from %d regions", len(all_listings), len(regions))
     return all_listings

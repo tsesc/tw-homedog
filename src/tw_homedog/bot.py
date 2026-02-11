@@ -2061,7 +2061,6 @@ async def favorites_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not listing:
             await query.edit_message_text("找不到此物件（可能已被刪除）")
             return
-        storage.mark_as_read("591", listing_id)
 
         # Enrich on detail view (single listing, in background thread)
         if mode == "buy" and not listing.get("is_enriched"):
