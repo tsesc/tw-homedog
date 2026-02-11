@@ -2629,7 +2629,14 @@ def create_application(
         map_to_parent={},
     )
 
-    app = Application.builder().token(bot_token).build()
+    app = (
+        Application.builder()
+        .token(bot_token)
+        .read_timeout(10)
+        .write_timeout(10)
+        .connect_timeout(10)
+        .build()
+    )
 
     # Store shared objects
     app.bot_data["storage"] = storage

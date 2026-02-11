@@ -8,6 +8,9 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - DATABASE_PATH=/app/data/homedog.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     volumes:
       - homedog-data:/app/data
       - homedog-logs:/app/logs
