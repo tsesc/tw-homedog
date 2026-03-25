@@ -214,11 +214,13 @@ def scrape(config: Config, progress_cb=None) -> list[dict]:
         page = context.new_page()
 
         # Bootstrap session by visiting the site
-        logger.info("Bootstrapping sinyi session...")
+        # Sinyi's Next.js SPA is heavy — use 60s minimum for Docker environments
+        bootstrap_timeout = max(config.scraper.timeout * 1000, 60000)
+        logger.info("Bootstrapping sinyi session (timeout=%dms)...", bootstrap_timeout)
         try:
-            page.goto(f"{BASE_URL}/buy/list", timeout=config.scraper.timeout * 1000)
-            page.wait_for_load_state("networkidle", timeout=config.scraper.timeout * 1000)
-            page.wait_for_timeout(2000)
+            page.goto(f"{BASE_URL}/buy/list", timeout=bootstrap_timeout)
+            page.wait_for_load_state("networkidle", timeout=bootstrap_timeout)
+            page.wait_for_timeout(3000)
         except Exception as e:
             logger.error("Failed to bootstrap sinyi session: %s", e)
             browser.close()
@@ -268,9 +270,9 @@ def scrape(config: Config, progress_cb=None) -> list[dict]:
                         pass
 
             page.on("response", capture_response)
-            page.reload(timeout=config.scraper.timeout * 1000)
-            page.wait_for_load_state("networkidle", timeout=config.scraper.timeout * 1000)
-            page.wait_for_timeout(2000)
+            page.reload(timeout=bootstrap_timeout)
+            page.wait_for_load_state("networkidle", timeout=bootstrap_timeout)
+            page.wait_for_timeout(3000)
 
             sat = captured.get("sat")
             sid = captured.get("sid")
