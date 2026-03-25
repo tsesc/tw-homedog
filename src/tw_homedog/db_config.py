@@ -31,6 +31,7 @@ class SearchConfig:
     keywords_include: list[str] = field(default_factory=list)
     keywords_exclude: list[str] = field(default_factory=list)
     max_pages: int = 3
+    sources: list[str] = field(default_factory=lambda: ["591"])
 
 
 @dataclass
@@ -271,6 +272,7 @@ class DbConfig:
                 keywords_include=_get("search.keywords_include", []),
                 keywords_exclude=_get("search.keywords_exclude", []),
                 max_pages=_get("search.max_pages", 3),
+                sources=_get("search.sources", ["591"]),
             ),
             telegram=TelegramConfig(
                 bot_token=str(_get("telegram.bot_token")),

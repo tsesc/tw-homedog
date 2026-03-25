@@ -30,7 +30,6 @@ from tw_homedog.dedup_cleanup import run_cleanup
 from tw_homedog.log import set_log_level
 from tw_homedog.map_preview import MapConfig, MapThumbnailProvider
 from tw_homedog.matcher import find_matching_listings
-from tw_homedog.normalizer import normalize_591_listing
 from tw_homedog.notifier import format_listing_message
 from tw_homedog.regions import (
     BUY_SECTION_CODES,
@@ -2219,13 +2218,12 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
     try:
         logger.info("Pipeline started")
 
-        # Scrape
-        raw_listings = await asyncio.to_thread(scrape_listings, config, _progress)
-        scraped = len(raw_listings)
-        _progress(f"爬取完成，共 {scraped} 筆原始物件，開始寫入與過濾")
+        # Scrape (returns already-normalized listings from all sources)
+        listings = await asyncio.to_thread(scrape_listings, config, _progress)
+        scraped = len(listings)
+        _progress(f"爬取完成，共 {scraped} 筆物件，開始寫入與過濾")
         batch_cache: dict[str, list[dict]] = {}
-        for raw in raw_listings:
-            normalized = normalize_591_listing(raw)
+        for normalized in listings:
             decision = storage.insert_listing_with_dedup(
                 normalized,
                 batch_cache=batch_cache,
