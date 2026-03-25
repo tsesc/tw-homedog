@@ -33,6 +33,20 @@ def test_normalize_address_stable():
     )
 
 
+def test_normalize_address_chinese_numeral_to_digit():
+    """Cross-site address normalization: 三段 ↔ 3段."""
+    assert normalize_address("內湖區成功路三段") == normalize_address("內湖區成功路3段")
+    assert normalize_address("大安區忠孝東路四段") == normalize_address("大安區忠孝東路4段")
+    assert normalize_address("信義區松仁路十二巷") == normalize_address("信義區松仁路12巷")
+    assert normalize_address("中山區南京東路二十一號") == normalize_address("中山區南京東路21號")
+
+
+def test_normalize_address_removes_city_prefix():
+    """City prefix removed for cross-site matching."""
+    assert normalize_address("台北市內湖區成功路3段") == normalize_address("內湖區成功路3段")
+    assert normalize_address("新北市板橋區文化路") == normalize_address("板橋區文化路")
+
+
 def test_score_duplicate_same_entity_with_format_variance():
     left = _listing()
     right = _listing(

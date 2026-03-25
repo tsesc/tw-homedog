@@ -753,6 +753,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             InlineKeyboardButton("排程", callback_data="settings:schedule"),
             InlineKeyboardButton("地圖", callback_data="settings:maps"),
         ],
+        [
+            InlineKeyboardButton("資料來源", callback_data="settings:sources"),
+        ],
     ]
     await update.message.reply_text(
         "設定選單：", reply_markup=InlineKeyboardMarkup(keyboard)
@@ -921,7 +924,66 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return SETTINGS_MENU
 
+    elif data == "settings:sources":
+        AVAILABLE_SOURCES = {"591": "591 房屋", "sinyi": "信義房屋", "yungching": "永慶房屋"}
+        current_sources = db_config.get("search.sources", ["591"])
+        buttons = []
+        for key, label in AVAILABLE_SOURCES.items():
+            prefix = "✅ " if key in current_sources else ""
+            buttons.append(InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"toggle_source:{key}"
+            ))
+        keyboard = [buttons, [InlineKeyboardButton("完成", callback_data="sources_done")]]
+        await query.edit_message_text(
+            "點擊切換資料來源（至少保留一個）：",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SETTINGS_MENU
+
     return None
+
+
+async def toggle_source_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle source toggle from settings."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    db_config: DbConfig = context.bot_data["db_config"]
+
+    if data == "sources_done":
+        summary = _config_summary(db_config)
+        await query.edit_message_text(f"資料來源已更新\n\n{summary}")
+        return ConversationHandler.END
+
+    source_key = data.split(":")[1]
+    current_sources = db_config.get("search.sources", ["591"])
+
+    if source_key in current_sources:
+        if len(current_sources) > 1:
+            current_sources.remove(source_key)
+        else:
+            await query.answer("至少需要保留一個來源", show_alert=True)
+            return SETTINGS_MENU
+    else:
+        current_sources.append(source_key)
+
+    db_config.set("search.sources", current_sources)
+
+    # Rebuild keyboard
+    AVAILABLE_SOURCES = {"591": "591 房屋", "sinyi": "信義房屋", "yungching": "永慶房屋"}
+    buttons = []
+    for key, label in AVAILABLE_SOURCES.items():
+        prefix = "✅ " if key in current_sources else ""
+        buttons.append(InlineKeyboardButton(
+            f"{prefix}{label}", callback_data=f"toggle_source:{key}"
+        ))
+    keyboard = [buttons, [InlineKeyboardButton("完成", callback_data="sources_done")]]
+    await query.edit_message_text(
+        "點擊切換資料來源（至少保留一個）：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return SETTINGS_MENU
 
 
 async def set_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2251,10 +2313,11 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
         matched = find_matching_listings(config, storage)
         _progress(f"過濾後符合條件：{len(matched)} 筆，準備通知")
 
-        # Enrich buy listings
+        # Enrich buy listings (591 only — other sources return complete data)
         if config.search.mode == "buy" and matched:
-            matched_ids = [m["listing_id"] for m in matched]
-            unenriched = storage.get_unenriched_listing_ids(matched_ids)
+            matched_591 = [m for m in matched if m.get("source") == "591"]
+            matched_ids = [m["listing_id"] for m in matched_591]
+            unenriched = storage.get_unenriched_listing_ids(matched_ids) if matched_ids else []
             if unenriched:
                 logger.info("Enriching %d listings...", len(unenriched))
                 session, headers = await asyncio.to_thread(
@@ -2385,6 +2448,10 @@ def _config_summary(db_config: DbConfig) -> str:
         lines.append(f"包含：{', '.join(kw_include)}")
     if kw_exclude:
         lines.append(f"排除：{', '.join(kw_exclude)}")
+    sources = db_config.get("search.sources", ["591"])
+    source_labels = {"591": "591", "sinyi": "信義", "yungching": "永慶"}
+    sources_str = ", ".join(source_labels.get(s, s) for s in sources)
+    lines.append(f"來源：{sources_str}")
     lines.append(f"頁數：{max_pages}")
     schedule_status = "已暫停" if paused else f"每 {interval} 分鐘"
     lines.append(f"排程：{schedule_status}")
@@ -2585,6 +2652,7 @@ def create_application(
                 CallbackQueryHandler(set_maps_callback, pattern=r"^set_maps:"),
                 CallbackQueryHandler(settings_district_callback, pattern=r"^district_"),
                 CallbackQueryHandler(layout_callback, pattern=r"^layout:"),
+                CallbackQueryHandler(toggle_source_callback, pattern=r"^(toggle_source:|sources_done)"),
             ],
             SETTINGS_PRICE_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_price_handler),
