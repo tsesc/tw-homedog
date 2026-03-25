@@ -12,13 +12,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tw_homedog.db_config import Config
 
-from tw_homedog.scrapers import scraper_591
+from tw_homedog.scrapers import scraper_591, scraper_sinyi, scraper_yungching
 
 logger = logging.getLogger(__name__)
 
 # Registry: source name → module with scrape(config, progress_cb) function
 SCRAPER_REGISTRY: dict[str, object] = {
     "591": scraper_591,
+    "sinyi": scraper_sinyi,
+    "yungching": scraper_yungching,
 }
 
 
