@@ -1920,7 +1920,7 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             by_source.setdefault(src, []).append(l["listing_id"])
         for src, ids in by_source.items():
             storage.mark_many_as_read(src, ids)
-        await query.edit_message_text(f"已將 {len(listing_ids)} 筆物件標記為已讀")
+        await query.edit_message_text(f"已將 {len(matched)} 筆物件標記為已讀")
         return
 
     # Favorites toggle from list detail

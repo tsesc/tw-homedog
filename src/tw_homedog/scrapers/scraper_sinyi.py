@@ -55,7 +55,10 @@ def _normalize_listing(item: dict) -> dict:
     house_no = item.get("houseNo", "")
     title = item.get("name")
     total_price = item.get("totalPrice")
-    price = int(total_price) if total_price is not None else None
+    try:
+        price = int(total_price) if total_price is not None else None
+    except (ValueError, TypeError):
+        price = None
     address = item.get("address")
 
     # District from zipCode

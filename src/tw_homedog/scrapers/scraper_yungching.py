@@ -62,7 +62,10 @@ def _normalize_listing(item: dict) -> dict:
     case_sid = str(item.get("caseSId", ""))
     title = item.get("caseName")
     price_raw = item.get("price")
-    price = int(price_raw) if price_raw is not None else None
+    try:
+        price = int(price_raw) if price_raw is not None else None
+    except (ValueError, TypeError):
+        price = None
     address = item.get("address")
 
     # Extract district from address (e.g., "台北市內湖區成功路" → "內湖區")
