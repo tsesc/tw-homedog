@@ -54,7 +54,7 @@ def test_get_district_zips_unknown():
 def test_build_request_payload_basic(buy_config):
     payload = _build_request_payload(buy_config, page=1)
     assert payload["page"] == 1
-    assert payload["pageCnt"] == 50
+    assert payload["pageCnt"] == 20
     f = payload["filter"]
     assert f["retRange"] == ["1"]  # Taipei
     assert f["price"]["priceRange"] == ["2000-3000"]

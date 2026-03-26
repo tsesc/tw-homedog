@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import time
@@ -135,7 +136,7 @@ def _normalize_listing(item: dict) -> dict:
     return normalized
 
 
-def _build_request_payload(config: Config, page: int = 1) -> dict:
+def _build_request_payload(config: Config, page: int = 1, ip_address: str = "") -> dict:
     """Build the POST payload for sinyi filterObject API."""
     ret_range = []
     for region_id in config.search.regions:
@@ -177,7 +178,7 @@ def _build_request_payload(config: Config, page: int = 1) -> dict:
 
     return {
         "machineNo": "",
-        "ipAddress": "",
+        "ipAddress": ip_address,
         "osType": 4,
         "model": "web",
         "deviceVersion": "Mac OS X 10.15.7",
@@ -192,7 +193,7 @@ def _build_request_payload(config: Config, page: int = 1) -> dict:
         "sinyiGroup": 1,
         "filter": filter_obj,
         "page": page,
-        "pageCnt": 50,
+        "pageCnt": 20,
         "sort": "0",
         "isReturnTotal": True,
     }
@@ -222,76 +223,85 @@ def scrape(config: Config, progress_cb=None) -> list[dict]:
         )
         page = context.new_page()
 
-        # Bootstrap session by visiting the site
-        # Sinyi's Next.js SPA is heavy — use 60s minimum for Docker environments
+        # Bootstrap session by visiting the site and capturing sat/sid tokens.
+        # Sinyi's Next.js SPA is heavy — capture tokens from network responses
+        # instead of waiting for full page load (which may never reach networkidle).
         bootstrap_timeout = max(config.scraper.timeout * 1000, 60000)
         logger.info("Bootstrapping sinyi session (timeout=%dms)...", bootstrap_timeout)
+
+        captured: dict[str, str] = {}
+
+        def capture_response(response):
+            url = response.url
+            if "appSetup.php" in url:
+                try:
+                    body = response.json()
+                    captured["sat"] = str(body.get("content", {}).get("accessCode", ""))
+                except Exception:
+                    pass
+            elif "getSession.php" in url:
+                try:
+                    body = response.json()
+                    captured["sid"] = str(body.get("content", {}).get("sid", ""))
+                except Exception:
+                    pass
+            elif "filterObject.php" in url:
+                # Capture ipAddress from the first real API call the page makes
+                pass
+
+        def capture_request(request):
+            if "filterObject.php" in request.url and request.post_data and "ip_address" not in captured:
+                try:
+                    body = json.loads(request.post_data)
+                    ip = body.get("ipAddress", "")
+                    if ip:
+                        captured["ip_address"] = ip
+                except Exception:
+                    pass
+
+        page.on("response", capture_response)
+        page.on("request", capture_request)
+
         try:
-            page.goto(f"{BASE_URL}/buy/list", timeout=bootstrap_timeout)
-            page.wait_for_load_state("networkidle", timeout=bootstrap_timeout)
-            page.wait_for_timeout(3000)
+            page.goto(f"{BASE_URL}/buy/list", timeout=bootstrap_timeout, wait_until="domcontentloaded")
+            # Wait for sat/sid + ipAddress to be captured from network (up to 30s)
+            for _ in range(60):
+                if captured.get("sat") and captured.get("sid"):
+                    break
+                page.wait_for_timeout(500)
+            # Wait a bit more for the first filterObject request (to capture ipAddress)
+            if not captured.get("ip_address"):
+                for _ in range(20):
+                    if captured.get("ip_address"):
+                        break
+                    page.wait_for_timeout(500)
         except Exception as e:
             logger.error("Failed to bootstrap sinyi session: %s", e)
             browser.close()
             return []
 
-        # Intercept to get sat and sid from initial API calls
-        sat = None
-        sid = None
+        sat = captured.get("sat")
+        sid = captured.get("sid")
 
-        cookies = context.cookies()
-        cookie_dict = {c["name"]: c["value"] for c in cookies}
-
-        # Try to get sat/sid from page's existing API calls by making a test call
-        # The sat and sid are set during page load via appSetup.php and getSession.php
-        # We capture them from the page's JavaScript context
-        try:
-            session_info = page.evaluate("""() => {
-                // Try to find sat/sid from window or global state
-                const w = window;
-                return {
-                    sat: w.__NEXT_DATA__?.props?.pageProps?.sat || '',
-                    sid: w.__NEXT_DATA__?.props?.pageProps?.sid || '',
-                };
-            }""")
-            sat = session_info.get("sat") or None
-            sid = session_info.get("sid") or None
-        except Exception:
-            pass
+        # Fallback: try __NEXT_DATA__ if network capture missed
+        if not sat or not sid:
+            try:
+                session_info = page.evaluate("""() => ({
+                    sat: window.__NEXT_DATA__?.props?.pageProps?.sat || '',
+                    sid: window.__NEXT_DATA__?.props?.pageProps?.sid || '',
+                })""")
+                sat = sat or session_info.get("sat") or None
+                sid = sid or session_info.get("sid") or None
+            except Exception:
+                pass
 
         if not sat or not sid:
-            # Fallback: capture from network requests
-            captured = {}
-
-            def capture_response(response):
-                url = response.url
-                if "appSetup.php" in url:
-                    try:
-                        body = response.json()
-                        captured["sat"] = str(body.get("content", {}).get("accessCode", ""))
-                    except Exception:
-                        pass
-                elif "getSession.php" in url:
-                    try:
-                        body = response.json()
-                        captured["sid"] = str(body.get("content", {}).get("sid", ""))
-                    except Exception:
-                        pass
-
-            page.on("response", capture_response)
-            page.reload(timeout=bootstrap_timeout)
-            page.wait_for_load_state("networkidle", timeout=bootstrap_timeout)
-            page.wait_for_timeout(3000)
-
-            sat = captured.get("sat")
-            sid = captured.get("sid")
-
-        if not sat or not sid:
-            logger.error("Failed to obtain sinyi session tokens (sat/sid)")
+            logger.error("Failed to obtain sinyi session tokens (sat=%s, sid=%s)", sat, sid)
             browser.close()
             return []
 
-        logger.info("Sinyi session bootstrapped (sat=%s, sid=%s...)", sat, sid[:8] if sid else "?")
+        client_ip = captured.get("ip_address", "")
+        logger.info("Sinyi session bootstrapped (sat=%s, sid=%s..., ip=%s)", sat, sid[:8] if sid else "?", client_ip)
 
         # Use Playwright's context.request for API calls
         headers = {
@@ -304,11 +314,11 @@ def scrape(config: Config, progress_cb=None) -> list[dict]:
         }
 
         for page_num in range(1, config.search.max_pages + 1):
-            payload = _build_request_payload(config, page=page_num)
+            payload = _build_request_payload(config, page=page_num, ip_address=client_ip)
             logger.info("Fetching sinyi page %d", page_num)
 
             try:
-                resp = context.request.post(API_URL, headers=headers, data=payload)
+                resp = context.request.post(API_URL, headers=headers, data=json.dumps(payload))
                 if resp.status != 200:
                     logger.error("Sinyi API returned status %d", resp.status)
                     break
