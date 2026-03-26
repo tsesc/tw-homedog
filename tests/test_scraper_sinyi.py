@@ -11,7 +11,7 @@ from tw_homedog.scrapers.scraper_sinyi import (
     _normalize_listing,
     scrape,
     source,
-    REGION_TO_RETRANGE,
+    CITY_TO_RETRANGE,
     TAIPEI_DISTRICT_ZIPS,
 )
 
@@ -228,8 +228,11 @@ def test_scrape_no_district_filter(buy_config):
 
 
 def test_region_mapping():
-    assert REGION_TO_RETRANGE[1] == "1"   # Taipei
-    assert REGION_TO_RETRANGE[3] == "2"   # New Taipei
+    assert CITY_TO_RETRANGE["台北市"] == "1"
+    assert CITY_TO_RETRANGE["新北市"] == "2"
+    assert CITY_TO_RETRANGE["台中市"] == "8"
+    assert CITY_TO_RETRANGE["台南市"] == "12"
+    assert CITY_TO_RETRANGE["高雄市"] == "14"
 
 
 def test_taipei_district_zips():

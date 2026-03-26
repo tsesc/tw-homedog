@@ -36,27 +36,28 @@ def test_source_name():
 
 
 def test_build_area_params_with_districts(buy_config):
-    areas = _build_area_params(buy_config)
-    assert areas == ["台北市-內湖區", "台北市-南港區"]
+    groups = _build_area_params(buy_config)
+    assert groups == [["台北市-內湖區", "台北市-南港區"]]
 
 
 def test_build_area_params_no_districts(buy_config):
     buy_config.search.districts = []
-    areas = _build_area_params(buy_config)
-    assert areas == ["台北市-"]
+    groups = _build_area_params(buy_config)
+    assert groups == [["台北市-"]]
 
 
 def test_build_area_params_multi_region(buy_config):
     buy_config.search.regions = [1, 3]
     buy_config.search.districts = ["內湖區"]
-    areas = _build_area_params(buy_config)
-    assert areas == ["台北市-內湖區", "新北市-內湖區"]
+    groups = _build_area_params(buy_config)
+    # Each region is a separate group (separate API request)
+    assert groups == [["台北市-內湖區"], ["新北市-內湖區"]]
 
 
 def test_build_area_params_unknown_region(buy_config):
     buy_config.search.regions = [999]
-    areas = _build_area_params(buy_config)
-    assert areas == []
+    groups = _build_area_params(buy_config)
+    assert groups == []
 
 
 SAMPLE_LISTING = {

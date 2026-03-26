@@ -9,6 +9,7 @@ import time
 from tw_homedog.db_config import Config
 from tw_homedog.dedup import build_entity_fingerprint
 from tw_homedog.normalizer import generate_content_hash
+from tw_homedog.regions import REGION_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +18,17 @@ source = "sinyi"
 API_URL = "https://sinyiwebapi.sinyi.com.tw/filterObject.php"
 BASE_URL = "https://www.sinyi.com.tw"
 
-# Map region IDs to sinyi retRange city codes
-REGION_TO_RETRANGE = {
-    1: "1",   # 台北市
-    3: "2",   # 新北市
-    6: "5",   # 桃園市
-    11: "8",  # 台中市
-    21: "12", # 台南市
-    23: "14", # 高雄市
+# Reverse lookup: region_id → Chinese name
+_REGION_ID_TO_NAME: dict[int, str] = {v: k for k, v in REGION_CODES.items()}
+
+# Map Chinese city name to sinyi retRange city codes
+CITY_TO_RETRANGE = {
+    "台北市": "1",
+    "新北市": "2",
+    "桃園市": "5",
+    "台中市": "8",
+    "台南市": "12",
+    "高雄市": "14",
 }
 
 # District name → zip code for client-side filtering
@@ -135,9 +139,11 @@ def _build_request_payload(config: Config, page: int = 1) -> dict:
     """Build the POST payload for sinyi filterObject API."""
     ret_range = []
     for region_id in config.search.regions:
-        code = REGION_TO_RETRANGE.get(region_id)
-        if code:
-            ret_range.append(code)
+        city_name = _REGION_ID_TO_NAME.get(region_id)
+        if city_name:
+            code = CITY_TO_RETRANGE.get(city_name)
+            if code:
+                ret_range.append(code)
 
     if not ret_range:
         ret_range = ["1"]  # Default to Taipei

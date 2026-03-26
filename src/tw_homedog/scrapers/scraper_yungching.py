@@ -12,6 +12,7 @@ import requests
 from tw_homedog.db_config import Config
 from tw_homedog.dedup import build_entity_fingerprint
 from tw_homedog.normalizer import extract_price, generate_content_hash
+from tw_homedog.regions import REGION_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +20,8 @@ source = "yungching"
 
 BUY_API_URL = "https://buy.yungching.com.tw/api/v2/list"
 
-# Map Chinese county names to Yungching area format
-COUNTY_NAMES = {
-    1: "台北市", 2: "基隆市", 3: "新北市", 6: "桃園市", 7: "新竹縣",
-    8: "新竹市", 10: "苗栗縣", 11: "台中市", 14: "彰化縣", 15: "南投縣",
-    17: "雲林縣", 19: "嘉義縣", 20: "嘉義市", 21: "台南市", 23: "高雄市",
-    26: "屏東縣", 33: "宜蘭縣", 34: "花蓮縣", 35: "台東縣", 36: "澎湖縣",
-    38: "金門縣", 39: "連江縣",
-}
+# Reverse lookup: region_id → Chinese name
+_REGION_ID_TO_NAME: dict[int, str] = {v: k for k, v in REGION_CODES.items()}
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -34,26 +29,33 @@ USER_AGENTS = [
 ]
 
 
-def _build_area_params(config: Config) -> list[str]:
+def _build_area_params(config: Config) -> list[list[str]]:
     """Build area query params from config regions and districts.
 
-    Returns list of area strings like ["台北市-內湖區", "台北市-南港區"].
-    If no districts specified, returns ["台北市-"] for the whole county.
+    Returns list of area groups, one per county:
+      [["台北市-內湖區", "台北市-南港區"], ["新北市-中和區"]]
+
+    Each group should be sent as a separate API request — Yungching API
+    returns 0 results when mixing areas from different counties in one request.
     """
-    areas = []
+    groups = []
     for region_id in config.search.regions:
-        county = COUNTY_NAMES.get(region_id)
+        county = _REGION_ID_TO_NAME.get(region_id)
         if not county:
             logger.warning("Unknown region ID %d for yungching", region_id)
             continue
 
+        county_areas = []
         if config.search.districts:
             for district in config.search.districts:
-                areas.append(f"{county}-{district}")
+                county_areas.append(f"{county}-{district}")
         else:
-            areas.append(f"{county}-")
+            county_areas.append(f"{county}-")
 
-    return areas
+        if county_areas:
+            groups.append(county_areas)
+
+    return groups
 
 
 def _normalize_listing(item: dict) -> dict:
@@ -162,8 +164,8 @@ def scrape(config: Config, progress_cb=None) -> list[dict]:
         logger.info("Yungching scraper only supports buy mode, skipping")
         return []
 
-    areas = _build_area_params(config)
-    if not areas:
+    area_groups = _build_area_params(config)
+    if not area_groups:
         logger.warning("No valid areas for yungching scraper")
         return []
 
@@ -175,68 +177,70 @@ def scrape(config: Config, progress_cb=None) -> list[dict]:
 
     all_listings = []
 
-    for page_num in range(1, config.search.max_pages + 1):
-        params: list[tuple[str, str]] = []
-        for area in areas:
-            params.append(("area", area))
-        params.append(("pg", str(page_num)))
-        params.append(("ps", "30"))
+    # Iterate per county group — Yungching API returns 0 results when mixing counties
+    for areas in area_groups:
+        for page_num in range(1, config.search.max_pages + 1):
+            params: list[tuple[str, str]] = []
+            for area in areas:
+                params.append(("area", area))
+            params.append(("pg", str(page_num)))
+            params.append(("ps", "30"))
 
-        # Price filters (unit: 萬)
-        if config.search.price_min:
-            params.append(("minPrice", str(int(config.search.price_min))))
-        if config.search.price_max:
-            params.append(("maxPrice", str(int(config.search.price_max))))
+            # Price filters (unit: 萬)
+            if config.search.price_min:
+                params.append(("minPrice", str(int(config.search.price_min))))
+            if config.search.price_max:
+                params.append(("maxPrice", str(int(config.search.price_max))))
 
-        # Room filters
-        if config.search.room_counts:
-            params.append(("minRoom", str(min(config.search.room_counts))))
-            params.append(("maxRoom", str(max(config.search.room_counts))))
+            # Room filters
+            if config.search.room_counts:
+                params.append(("minRoom", str(min(config.search.room_counts))))
+                params.append(("maxRoom", str(max(config.search.room_counts))))
 
-        logger.info("Fetching yungching page %d", page_num)
+            logger.info("Fetching yungching page %d for %s", page_num, areas[0].split("-")[0])
 
-        try:
-            resp = session.get(BUY_API_URL, params=params, timeout=config.scraper.timeout)
-            if resp.status_code != 200:
-                logger.error("Yungching API returned status %d", resp.status_code)
-                break
+            try:
+                resp = session.get(BUY_API_URL, params=params, timeout=config.scraper.timeout)
+                if resp.status_code != 200:
+                    logger.error("Yungching API returned status %d", resp.status_code)
+                    break
 
-            body = resp.json()
-            if body.get("status") != "Success":
-                logger.error("Yungching API error: %s", body.get("status"))
-                break
+                body = resp.json()
+                if body.get("status") != "Success":
+                    logger.error("Yungching API error: %s", body.get("status"))
+                    break
 
-            data = body.get("data", {})
-            items = data.get("list", [])
-            total = data.get("totalCount", 0)
-            pa = data.get("pa", {})
-            total_pages = pa.get("totalPageCount", 1)
+                data = body.get("data", {})
+                items = data.get("list", [])
+                total = data.get("totalCount", 0)
+                pa = data.get("pa", {})
+                total_pages = pa.get("totalPageCount", 1)
 
-            if not items:
-                logger.info("No more yungching listings")
-                break
+                if not items:
+                    logger.info("No more yungching listings")
+                    break
 
-            for item in items:
-                all_listings.append(_normalize_listing(item))
+                for item in items:
+                    all_listings.append(_normalize_listing(item))
 
-            if progress_cb:
-                progress_cb(
-                    f"永慶 page {page_num}: +{len(items)} (累計 {len(all_listings)}, 共 {total})"
+                if progress_cb:
+                    progress_cb(
+                        f"永慶 page {page_num}: +{len(items)} (累計 {len(all_listings)}, 共 {total})"
+                    )
+
+                logger.info(
+                    "Yungching page %d: got %d items, total so far: %d (API total: %d)",
+                    page_num, len(items), len(all_listings), total,
                 )
 
-            logger.info(
-                "Yungching page %d: got %d items, total so far: %d (API total: %d)",
-                page_num, len(items), len(all_listings), total,
-            )
+                if page_num >= total_pages:
+                    break
 
-            if page_num >= total_pages:
+            except Exception as e:
+                logger.error("Failed to fetch yungching listings: %s", e)
                 break
 
-        except Exception as e:
-            logger.error("Failed to fetch yungching listings: %s", e)
-            break
-
-        time.sleep(random.uniform(config.scraper.delay_min, config.scraper.delay_max))
+            time.sleep(random.uniform(config.scraper.delay_min, config.scraper.delay_max))
 
     logger.info("Total yungching listings collected: %d", len(all_listings))
     return all_listings
