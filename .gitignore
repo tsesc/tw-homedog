@@ -28,6 +28,9 @@ data/*.db-shm
 # Cloned reference repo
 base-scraper/
 
+# Logs (may contain secrets in URLs)
+logs/
+
 # Test/cache
 .pytest_cache/
 
