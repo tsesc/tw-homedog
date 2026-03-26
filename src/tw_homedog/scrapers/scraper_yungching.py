@@ -128,7 +128,7 @@ def _normalize_listing(item: dict) -> dict:
     # Type
     kind_name = item.get("caseTypeName")
 
-    url = f"https://buy.yungching.com.tw/{case_key}" if case_key else None
+    url = f"https://buy.yungching.com.tw/list/detail/{case_key}" if case_key else None
 
     raw_hash = generate_content_hash(title, price, address)
 
