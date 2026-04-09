@@ -21,10 +21,60 @@ def _normalize_text(value: str | None) -> str:
     return re.sub(r"[^\w\u4e00-\u9fff]", "", text)
 
 
+_ZH_DIGIT_MAP = {
+    "一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+    "六": "6", "七": "7", "八": "8", "九": "9", "十": "10",
+}
+_ZH_TEENS = {
+    "十一": "11", "十二": "12", "十三": "13", "十四": "14", "十五": "15",
+    "十六": "16", "十七": "17", "十八": "18", "十九": "19",
+}
+_ZH_TENS = {
+    "二十": "20", "三十": "30", "四十": "40", "五十": "50",
+}
+
+
+def _chinese_numeral_to_digit(text: str) -> str:
+    """Convert Chinese numerals to Arabic digits for address normalization.
+
+    Handles: 一~九, 十~十九, 二十~五十, and compounds like 二十一.
+    """
+    # Compounds first (二十一 → 21)
+    for tens_zh, tens_val in _ZH_TENS.items():
+        for ones_zh, ones_val in _ZH_DIGIT_MAP.items():
+            if ones_zh == "十":
+                continue
+            compound = tens_zh + ones_zh
+            if compound in text:
+                text = text.replace(compound, str(int(tens_val) + int(ones_val)))
+    # Teens (十一 → 11)
+    for zh, digit in _ZH_TEENS.items():
+        text = text.replace(zh, digit)
+    # Tens (二十 → 20)
+    for zh, digit in _ZH_TENS.items():
+        text = text.replace(zh, digit)
+    # Singles (一 → 1), but 十 → 10
+    for zh, digit in _ZH_DIGIT_MAP.items():
+        text = text.replace(zh, digit)
+    return text
+
+
 def normalize_address(value: str | None) -> str:
-    """Normalize address-like text to stable comparable text."""
+    """Normalize address-like text to stable comparable text.
+
+    Handles cross-site differences:
+    - 「三段」↔「3段」 (Chinese numeral → digit)
+    - 「台北市內湖區」→「內湖區」 (remove city prefix)
+    - Floor suffixes removed (often differ between brokers)
+    """
     text = _normalize_text(value)
-    # remove common floor suffixes that often differ between brokers
+    # Remove city/county prefix (redundant — district already captures this)
+    text = re.sub(r"^(臺北市|新北市|桃園市|臺中市|臺南市|高雄市|基隆市|新竹市|"
+                  r"嘉義市|新竹縣|苗栗縣|彰化縣|南投縣|雲林縣|嘉義縣|屏東縣|"
+                  r"宜蘭縣|花蓮縣|臺東縣|澎湖縣|金門縣|連江縣)", "", text)
+    # Convert Chinese numerals to digits (三段 → 3段)
+    text = _chinese_numeral_to_digit(text)
+    # Remove common floor suffixes that often differ between brokers
     text = re.sub(r"\d+樓", "", text)
     return text
 

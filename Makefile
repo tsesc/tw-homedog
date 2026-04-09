@@ -20,6 +20,7 @@ sync:
 		--exclude='.agent/' \
 		--exclude='.augment/' \
 		--exclude='.codex/' \
+		--exclude='logs/' \
 		./ $(REMOTE_HOST):$(REMOTE_PATH)/
 
 down:

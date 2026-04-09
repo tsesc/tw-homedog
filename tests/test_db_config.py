@@ -182,3 +182,39 @@ def test_build_config_validates_year_range(db_config):
         db_config.build_config()
 
 
+def test_build_config_sources_default(db_config):
+    """sources defaults to ['591'] when not set in DB."""
+    db_config.set_many({
+        "search.regions": [1],
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 3000,
+        "telegram.bot_token": "123:ABC",
+        "telegram.chat_id": "456",
+    })
+    config = db_config.build_config()
+    assert config.search.sources == ["591"]
+
+
+def test_build_config_sources_from_db(db_config):
+    """sources loaded from DB when explicitly set."""
+    db_config.set_many({
+        "search.regions": [1],
+        "search.districts": ["大安區"],
+        "search.price_min": 1000,
+        "search.price_max": 3000,
+        "search.sources": ["591", "sinyi"],
+        "telegram.bot_token": "123:ABC",
+        "telegram.chat_id": "456",
+    })
+    config = db_config.build_config()
+    assert config.search.sources == ["591", "sinyi"]
+
+
+def test_search_config_sources_default():
+    """SearchConfig sources defaults to ['591']."""
+    from tw_homedog.db_config import SearchConfig
+    sc = SearchConfig(regions=[1], districts=[], price_min=0, price_max=0)
+    assert sc.sources == ["591"]
+
+

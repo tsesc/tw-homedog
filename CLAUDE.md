@@ -21,16 +21,18 @@ docker compose logs -f                 # View logs
 
 ## 專案概述
 
-台灣 591 房屋網的智慧通知系統。自動爬取買房/租房物件，依使用者設定的條件篩選後，透過 Telegram Bot 推送通知。
+台灣房屋智慧通知系統。支援多來源（591、信義房屋、永慶房屋）自動爬取買房/租房物件，依使用者設定的條件篩選後，透過 Telegram Bot 推送通知。跨網站自動去重。
 
 ## 運作流程
 
 ### Pipeline: `scraper → normalizer → storage → matcher → notifier`
 
-1. **爬取 (scraper.py)** — 從 591 網站抓取房屋物件原始資料
-   - 買房模式：Playwright 取得 session → requests 呼叫 BFF API (`bff-house.591.com.tw`)
-   - 租房模式：Playwright 收集物件 ID → requests 抓取詳情 HTML（僅台北市驗證過）
-   - 支援多地區同時搜尋：對每個 region 分別建立 session 並爬取
+1. **爬取 (scrapers/)** — 從多個來源抓取房屋物件，每個來源一個 plugin 模組
+   - **591** (`scraper_591.py`)：買房用 BFF API (`bff-house.591.com.tw`)，租房用 Playwright + HTML
+   - **信義房屋** (`scraper_sinyi.py`)：Playwright bootstrap session → `context.request` 呼叫 API（district 過濾在 client-side）
+   - **永慶房屋** (`scraper_yungching.py`)：純 REST API，無需認證
+   - 每個 scraper 獨立 try/except，一個失敗不影響其他
+   - `scrapers/__init__.py` 為 dispatcher，根據 `config.search.sources` 決定啟用哪些來源
 2. **正規化 (normalizer.py)** — 將原始資料轉換為統一格式，產生 SHA256 content hash 用於去重
 3. **儲存 (storage.py)** — 寫入 SQLite，以 `(source, listing_id)` 和 `raw_hash` 雙重去重
 4. **篩選 (matcher.py)** — 從 DB 取出所有「未讀」物件，依條件過濾：
@@ -42,7 +44,7 @@ docker compose logs -f                 # View logs
 
 ### 買房模式的 Enrichment
 
-符合篩選條件的買房物件會額外呼叫 detail API 取得：parking_desc、public_ratio、manage_price_desc、fitment、shape_name、community_name、main_area、direction。Enrichment 結果存回 DB 的 `is_enriched` 欄位，避免重複呼叫。Enrich 後會重新執行 matcher（因為新欄位可能影響關鍵字篩選結果）。
+符合篩選條件的 **591** 買房物件會額外呼叫 detail API 取得：parking_desc、public_ratio、manage_price_desc、fitment、shape_name、community_name、main_area、direction。Enrichment 結果存回 DB 的 `is_enriched` 欄位，避免重複呼叫。Enrich 後會重新執行 matcher（因為新欄位可能影響關鍵字篩選結果）。信義和永慶的 scraper 一次取得完整資料，不需要 enrichment。
 
 ## DB 結構 (SQLite)
 
@@ -63,8 +65,14 @@ docker compose logs -f                 # View logs
 - **bot.py** — Telegram Bot Application，ConversationHandler 處理 setup flow，InlineKeyboard 處理 settings，JobQueue 排程
 - **db_config.py** — Config dataclasses（`Config`, `SearchConfig`, `TelegramConfig`, `ScraperConfig`, `DedupConfig`）和 SQLite key-value 設定存儲（`DbConfig`），`build_config()` 從 DB 組建 Config dataclass。支援 `search.region`（舊格式）和 `search.regions`（新格式 list）的向後相容
 - **regions.py** — 全台 22 縣市的 region code 和 district section code。買賣/租房的 section code 完全不同（如內湖區：buy=10, rent=5）。Section codes 須與 591 BFF API 實際回傳值一致
-- **scraper.py** — 591 爬蟲。`scrape_listings()` 為統一入口，依 mode 分派到 `scrape_buy_listings()` 或 `scrape_rent_listings()`
-- **dedup.py** — 物件去重引擎。使用 `entity_fingerprint`（地址+社區正規化後的 hash）識別同一實體，`score_duplicate()` 計算兩物件相似度（標題、地址、價格、坪數加權），超過門檻視為重複
+- **scrapers/** — 多來源爬蟲 plugin 系統
+  - `__init__.py` — dispatcher + registry，根據 `config.search.sources` 分派
+  - `base.py` — `ListingScraper` Protocol + `NormalizedListing` TypedDict
+  - `scraper_591.py` — 591 爬蟲（Playwright + BFF API）
+  - `scraper_sinyi.py` — 信義房屋爬蟲（Playwright context.request + POST API）
+  - `scraper_yungching.py` — 永慶房屋爬蟲（純 REST GET API，無需認證）
+- **scraper.py** — 向後相容的 thin wrapper，委派到 `scrapers/` dispatcher
+- **dedup.py** — 物件去重引擎。使用 `entity_fingerprint`（地址+社區正規化後的 hash）識別同一實體，`score_duplicate()` 計算兩物件相似度（標題、地址、價格、坪數加權），超過門檻視為重複。`normalize_address` 支援中文數字轉換（三段↔3段）和城市前綴移除，以改善跨網站去重效果
 - **dedup_cleanup.py** — 歷史去重清理。掃描 DB 中 fingerprint 相同的群組，規劃合併（保留 canonical listing，遷移關聯表記錄），支援 dry-run 和 batch apply
 - **map_preview.py** — Google Maps Static API 地圖縮圖產生與快取。支援 Geocoding API 地址→座標轉換，檔案級快取（可設 TTL），失敗時自動降級
 - **templates.py** — 預設設定模板，用於 Bot 快速設定
@@ -93,6 +101,10 @@ docker compose logs -f                 # View logs
 - **BUY_SECTION_CODES 必須與 591 BFF API 實際值一致**。可用 API `regionid=X&section=Y` 驗證 `section_name` 回傳值。各地區 code 不是連續或可預測的
 - `notifier.py` 在 sync code 中使用 `asyncio.run()` 呼叫 Telegram async API
 - `python-telegram-bot[job-queue]` extra 是 JobQueue/APScheduler 所需
+- **信義房屋 API** 不支援 district server-side 過濾 — 必須在 client-side 用 `zipCode` 欄位過濾
+- **信義房屋 API** 必須用 Playwright `context.request` 呼叫，plain `requests` 會被拒絕（error 410）
+- **永慶房屋 API** 無需認證，純 GET，但 page size 固定 ~33 筆（`ps` 參數被忽略）
+- **永慶房屋** 跨縣市搜尋時不能用重複的 `area` 參數（會返回 0 結果），需分次請求
 
 ## Environment Variables
 
@@ -109,4 +121,4 @@ Config 支援中文格式：`regions: ["台北市", "新北市"]`、`districts: 
 
 ## Testing
 
-Tests use `tmp_path` for isolated SQLite DBs. External APIs (Telegram, 591) are mocked. Test helpers like `_listing(**overrides)` create test data with sensible defaults. 目前共 205 個測試。
+Tests use `tmp_path` for isolated SQLite DBs. External APIs (Telegram, 591, sinyi, yungching) are mocked. Test helpers like `_listing(**overrides)` create test data with sensible defaults. 目前共 247 個測試。

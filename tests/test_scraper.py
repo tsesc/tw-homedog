@@ -11,13 +11,13 @@ from tw_homedog.regions import (
     EN_TO_ZH,
     resolve_districts,
 )
-from tw_homedog.scraper import (
+from tw_homedog.scraper import scrape_listings
+from tw_homedog.scrapers.scraper_591 import (
     build_search_url,
     _parse_listing_html,
     _normalize_buy_listing,
     _extract_detail_fields,
     fetch_buy_listing_detail,
-    scrape_listings,
     _scrape_single_region,
 )
 
@@ -290,7 +290,7 @@ def test_scrape_listings_multi_region_combined(monkeypatch):
         rid = cfg.search.regions[0]
         return [{"listing_id": f"{rid}-1"}, {"listing_id": f"{rid}-2"}]
 
-    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+    with patch("tw_homedog.scrapers.scraper_591.scrape_buy_listings", side_effect=fake_scrape):
         result = scrape_listings(config)
 
     assert len(result) == 4
@@ -305,7 +305,7 @@ def test_scrape_listings_single_region_direct():
     def fake_scrape(cfg, progress_cb=None):
         return [{"listing_id": "1-1"}]
 
-    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+    with patch("tw_homedog.scrapers.scraper_591.scrape_buy_listings", side_effect=fake_scrape):
         result = scrape_listings(config)
 
     assert len(result) == 1
@@ -322,7 +322,7 @@ def test_scrape_listings_one_region_failure():
             raise RuntimeError("network error")
         return [{"listing_id": f"{rid}-1"}]
 
-    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+    with patch("tw_homedog.scrapers.scraper_591.scrape_buy_listings", side_effect=fake_scrape):
         result = scrape_listings(config)
 
     assert len(result) == 1
@@ -340,7 +340,7 @@ def test_scrape_listings_progress_callback_thread_safe():
             progress_cb(f"region {rid}")
         return [{"listing_id": f"{rid}-1"}]
 
-    with patch("tw_homedog.scraper.scrape_buy_listings", side_effect=fake_scrape):
+    with patch("tw_homedog.scrapers.scraper_591.scrape_buy_listings", side_effect=fake_scrape):
         result = scrape_listings(config, progress_cb=lambda m: messages.append(m))
 
     assert len(result) == 2

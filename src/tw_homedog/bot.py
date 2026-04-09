@@ -30,7 +30,6 @@ from tw_homedog.dedup_cleanup import run_cleanup
 from tw_homedog.log import set_log_level
 from tw_homedog.map_preview import MapConfig, MapThumbnailProvider
 from tw_homedog.matcher import find_matching_listings
-from tw_homedog.normalizer import normalize_591_listing
 from tw_homedog.notifier import format_listing_message
 from tw_homedog.regions import (
     BUY_SECTION_CODES,
@@ -754,6 +753,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             InlineKeyboardButton("排程", callback_data="settings:schedule"),
             InlineKeyboardButton("地圖", callback_data="settings:maps"),
         ],
+        [
+            InlineKeyboardButton("資料來源", callback_data="settings:sources"),
+        ],
     ]
     await update.message.reply_text(
         "設定選單：", reply_markup=InlineKeyboardMarkup(keyboard)
@@ -922,7 +924,66 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return SETTINGS_MENU
 
+    elif data == "settings:sources":
+        AVAILABLE_SOURCES = {"591": "591 房屋", "sinyi": "信義房屋", "yungching": "永慶房屋"}
+        current_sources = db_config.get("search.sources", ["591"])
+        buttons = []
+        for key, label in AVAILABLE_SOURCES.items():
+            prefix = "✅ " if key in current_sources else ""
+            buttons.append(InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"toggle_source:{key}"
+            ))
+        keyboard = [buttons, [InlineKeyboardButton("完成", callback_data="sources_done")]]
+        await query.edit_message_text(
+            "點擊切換資料來源（至少保留一個）：",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SETTINGS_MENU
+
     return None
+
+
+async def toggle_source_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle source toggle from settings."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    db_config: DbConfig = context.bot_data["db_config"]
+
+    if data == "sources_done":
+        summary = _config_summary(db_config)
+        await query.edit_message_text(f"資料來源已更新\n\n{summary}")
+        return ConversationHandler.END
+
+    source_key = data.split(":")[1]
+    current_sources = db_config.get("search.sources", ["591"])
+
+    if source_key in current_sources:
+        if len(current_sources) > 1:
+            current_sources.remove(source_key)
+        else:
+            await query.answer("至少需要保留一個來源", show_alert=True)
+            return SETTINGS_MENU
+    else:
+        current_sources.append(source_key)
+
+    db_config.set("search.sources", current_sources)
+
+    # Rebuild keyboard
+    AVAILABLE_SOURCES = {"591": "591 房屋", "sinyi": "信義房屋", "yungching": "永慶房屋"}
+    buttons = []
+    for key, label in AVAILABLE_SOURCES.items():
+        prefix = "✅ " if key in current_sources else ""
+        buttons.append(InlineKeyboardButton(
+            f"{prefix}{label}", callback_data=f"toggle_source:{key}"
+        ))
+    keyboard = [buttons, [InlineKeyboardButton("完成", callback_data="sources_done")]]
+    await query.edit_message_text(
+        "點擊切換資料來源（至少保留一個）：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return SETTINGS_MENU
 
 
 async def set_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1481,7 +1542,7 @@ def _get_matched(
     # Mark favorites flag if needed for general lists
     if not only_favorites:
         for l in listings:
-            l["is_favorite"] = storage.is_favorite("591", l["listing_id"])
+            l["is_favorite"] = storage.is_favorite(l.get("source", "591"), l["listing_id"])
 
     return listings
 
@@ -1584,14 +1645,15 @@ def _build_list_keyboard(
         if listing.get("is_read"):
             prefix += "✅ "
         label_main = _clip(prefix + label_main, 64)
+        src = listing.get("source", "591")
         buttons.append([InlineKeyboardButton(
-            label_main, callback_data=f"{context}:d:{listing['listing_id']}"
+            label_main, callback_data=f"{context}:d:{src}:{listing['listing_id']}"
         )])
 
         detail_parts = [district, price_str, size_str, layout, age, address_str]
         label_detail = _clip(" · ".join([p for p in detail_parts if p]), 64)
         buttons.append([InlineKeyboardButton(
-            label_detail, callback_data=f"{context}:d:{listing['listing_id']}"
+            label_detail, callback_data=f"{context}:d:{src}:{listing['listing_id']}"
         )])
 
     # Navigation row
@@ -1690,20 +1752,22 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Show detail
     if data.startswith("list:d:"):
-        listing_id = data.split(":")[2]
-        listing = storage.get_listing_by_id("591", listing_id)
+        parts = data.split(":")
+        source = parts[2] if len(parts) >= 4 else "591"
+        listing_id = parts[3] if len(parts) >= 4 else parts[2]
+        listing = storage.get_listing_by_id(source, listing_id)
         if not listing:
             await query.edit_message_text("找不到此物件")
             return
 
         # Auto-mark as read
-        storage.mark_as_read("591", listing_id)
+        storage.mark_as_read(source, listing_id)
 
-        # Enrich on detail view (single listing, in background thread)
-        if mode == "buy" and not listing.get("is_enriched"):
+        # Enrich on detail view (591 only — other sources return complete data)
+        if mode == "buy" and source == "591" and not listing.get("is_enriched"):
             listing = await _enrich_single(db_config, storage, listing_id) or listing
 
-        is_fav = storage.is_favorite("591", listing_id)
+        is_fav = storage.is_favorite(source, listing_id)
         msg = format_listing_message(listing, mode=mode)
         buttons = [
             [
@@ -1711,7 +1775,7 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None,
             ]
         ]
-        fav_btn = InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{listing_id}") if not is_fav else InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{listing_id}")
+        fav_btn = InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{source}:{listing_id}") if not is_fav else InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{source}:{listing_id}")
         buttons.append([fav_btn])
         # Clean None
         buttons = [[b for b in row if b] for row in buttons]
@@ -1849,22 +1913,29 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not matched:
             await query.edit_message_text("沒有可標記的物件")
             return
-        listing_ids = [l["listing_id"] for l in matched]
-        storage.mark_many_as_read("591", listing_ids)
-        await query.edit_message_text(f"已將 {len(listing_ids)} 筆物件標記為已讀")
+        # Group by source for correct mark-as-read
+        by_source: dict[str, list[str]] = {}
+        for l in matched:
+            src = l.get("source", "591")
+            by_source.setdefault(src, []).append(l["listing_id"])
+        for src, ids in by_source.items():
+            storage.mark_many_as_read(src, ids)
+        await query.edit_message_text(f"已將 {len(matched)} 筆物件標記為已讀")
         return
 
     # Favorites toggle from list detail
     if data.startswith("list:fav:add:"):
-        listing_id = data.split(":")[3]
-        storage.add_favorite("591", listing_id)
-        listing = storage.get_listing_by_id("591", listing_id) or {}
+        parts = data.split(":")
+        source = parts[3] if len(parts) >= 5 else "591"
+        listing_id = parts[4] if len(parts) >= 5 else parts[3]
+        storage.add_favorite(source, listing_id)
+        listing = storage.get_listing_by_id(source, listing_id) or {}
         buttons = [
             [
                 InlineKeyboardButton("◀ 返回列表", callback_data="list:back"),
                 InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None,
             ],
-            [InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{listing_id}")],
+            [InlineKeyboardButton("🗑 取消最愛", callback_data=f"list:fav:del:{source}:{listing_id}")],
         ]
         buttons = [[b for b in row if b] for row in buttons]
         keyboard = InlineKeyboardMarkup(buttons)
@@ -1878,15 +1949,17 @@ async def list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if data.startswith("list:fav:del:"):
-        listing_id = data.split(":")[3]
-        storage.remove_favorite("591", listing_id)
-        listing = storage.get_listing_by_id("591", listing_id) or {}
+        parts = data.split(":")
+        source = parts[3] if len(parts) >= 5 else "591"
+        listing_id = parts[4] if len(parts) >= 5 else parts[3]
+        storage.remove_favorite(source, listing_id)
+        listing = storage.get_listing_by_id(source, listing_id) or {}
         buttons = [
             [
                 InlineKeyboardButton("◀ 返回列表", callback_data="list:back"),
                 InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None,
             ],
-            [InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{listing_id}")],
+            [InlineKeyboardButton("⭐ 加入最愛", callback_data=f"list:fav:add:{source}:{listing_id}")],
         ]
         buttons = [[b for b in row if b] for row in buttons]
         keyboard = InlineKeyboardMarkup(buttons)
@@ -2056,21 +2129,23 @@ async def favorites_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if data.startswith("fav:d:"):
-        listing_id = data.split(":")[2]
-        listing = storage.get_listing_by_id("591", listing_id)
+        parts = data.split(":")
+        source = parts[2] if len(parts) >= 4 else "591"
+        listing_id = parts[3] if len(parts) >= 4 else parts[2]
+        listing = storage.get_listing_by_id(source, listing_id)
         if not listing:
             await query.edit_message_text("找不到此物件（可能已被刪除）")
             return
 
-        # Enrich on detail view (single listing, in background thread)
-        if mode == "buy" and not listing.get("is_enriched"):
+        # Enrich on detail view (591 only — other sources return complete data)
+        if mode == "buy" and source == "591" and not listing.get("is_enriched"):
             listing = await _enrich_single(db_config, storage, listing_id) or listing
 
         msg = format_listing_message(listing, mode=mode)
         buttons = [
             [InlineKeyboardButton("◀ 返回最愛", callback_data="fav:back"),
              InlineKeyboardButton("🔗 開啟連結", url=listing.get("url")) if listing.get("url") else None],
-            [InlineKeyboardButton("🗑 取消最愛", callback_data=f"fav:del:{listing_id}")]
+            [InlineKeyboardButton("🗑 取消最愛", callback_data=f"fav:del:{source}:{listing_id}")]
         ]
         buttons = [[b for b in row if b] for row in buttons]
         keyboard = InlineKeyboardMarkup(buttons)
@@ -2143,8 +2218,10 @@ async def favorites_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if data.startswith("fav:del:"):
-        listing_id = data.split(":")[2]
-        storage.remove_favorite("591", listing_id)
+        parts = data.split(":")
+        source = parts[2] if len(parts) >= 4 else "591"
+        listing_id = parts[3] if len(parts) >= 4 else parts[2]
+        storage.remove_favorite(source, listing_id)
         favs = _favorite_dataset(storage, show_read=show_read)
         if not favs:
             try:
@@ -2219,13 +2296,12 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
     try:
         logger.info("Pipeline started")
 
-        # Scrape
-        raw_listings = await asyncio.to_thread(scrape_listings, config, _progress)
-        scraped = len(raw_listings)
-        _progress(f"爬取完成，共 {scraped} 筆原始物件，開始寫入與過濾")
+        # Scrape (returns already-normalized listings from all sources)
+        listings = await asyncio.to_thread(scrape_listings, config, _progress)
+        scraped = len(listings)
+        _progress(f"爬取完成，共 {scraped} 筆物件，開始寫入與過濾")
         batch_cache: dict[str, list[dict]] = {}
-        for raw in raw_listings:
-            normalized = normalize_591_listing(raw)
+        for normalized in listings:
             decision = storage.insert_listing_with_dedup(
                 normalized,
                 batch_cache=batch_cache,
@@ -2253,10 +2329,11 @@ async def _run_pipeline(context: ContextTypes.DEFAULT_TYPE) -> str:
         matched = find_matching_listings(config, storage)
         _progress(f"過濾後符合條件：{len(matched)} 筆，準備通知")
 
-        # Enrich buy listings
+        # Enrich buy listings (591 only — other sources return complete data)
         if config.search.mode == "buy" and matched:
-            matched_ids = [m["listing_id"] for m in matched]
-            unenriched = storage.get_unenriched_listing_ids(matched_ids)
+            matched_591 = [m for m in matched if m.get("source") == "591"]
+            matched_ids = [m["listing_id"] for m in matched_591]
+            unenriched = storage.get_unenriched_listing_ids(matched_ids) if matched_ids else []
             if unenriched:
                 logger.info("Enriching %d listings...", len(unenriched))
                 session, headers = await asyncio.to_thread(
@@ -2387,6 +2464,10 @@ def _config_summary(db_config: DbConfig) -> str:
         lines.append(f"包含：{', '.join(kw_include)}")
     if kw_exclude:
         lines.append(f"排除：{', '.join(kw_exclude)}")
+    sources = db_config.get("search.sources", ["591"])
+    source_labels = {"591": "591", "sinyi": "信義", "yungching": "永慶"}
+    sources_str = ", ".join(source_labels.get(s, s) for s in sources)
+    lines.append(f"來源：{sources_str}")
     lines.append(f"頁數：{max_pages}")
     schedule_status = "已暫停" if paused else f"每 {interval} 分鐘"
     lines.append(f"排程：{schedule_status}")
@@ -2587,6 +2668,7 @@ def create_application(
                 CallbackQueryHandler(set_maps_callback, pattern=r"^set_maps:"),
                 CallbackQueryHandler(settings_district_callback, pattern=r"^district_"),
                 CallbackQueryHandler(layout_callback, pattern=r"^layout:"),
+                CallbackQueryHandler(toggle_source_callback, pattern=r"^(toggle_source:|sources_done)"),
             ],
             SETTINGS_PRICE_INPUT: [
                 MessageHandler(auth & filters.TEXT & ~filters.COMMAND, settings_price_handler),

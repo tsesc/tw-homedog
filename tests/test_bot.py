@@ -235,9 +235,9 @@ def test_build_list_keyboard_single_page():
     # Each listing has 2 buttons (title/community + detail row), then nav + actions
     assert len(rows) == 8
     # First listing row
-    assert rows[0][0].callback_data == "list:d:0"
+    assert rows[0][0].callback_data == "list:d:591:0"
     assert "大安區" in rows[0][0].text
-    assert rows[1][0].callback_data == "list:d:0"
+    assert rows[1][0].callback_data == "list:d:591:0"
     # Nav row shows 1/1
     assert "1/1" in rows[6][0].text
     # Action row
